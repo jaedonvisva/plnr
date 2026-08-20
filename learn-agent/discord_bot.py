@@ -23,14 +23,31 @@ this exits before the Discord client ever connects -- the bot is never
 visibly online while unable to actually answer anything.
 """
 
+import importlib.util
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
-import agent as agent_module
 from agent import backend as backend_module
 from discord_adapter.bot import LearnDiscordClient
 from discord_adapter.config import DiscordConfigError, load_config
 from discord_adapter.session import AgentSession
+
+# `import agent` is ambiguous in this directory: `agent.py` (this project's
+# CLI script) and `agent/` (the package `discord_adapter.session` etc. pull
+# from) share the same name. Python's import system prefers the package
+# over the same-named module unconditionally, so a plain `import agent`
+# silently binds to the PACKAGE, not the script -- `agent_module._connect`,
+# `._model_arg`, `.connect_and_authenticate`, and `.AgentStartupError`
+# (all defined in agent.py itself, not the package) would then be missing
+# at runtime with an AttributeError, even though `import discord_bot`
+# alone succeeds (nothing above touches those attributes at import time).
+# Loading agent.py by its literal file path sidesteps the name collision
+# without renaming either agent.py or the agent/ package.
+_agent_py_path = Path(__file__).resolve().parent / "agent.py"
+_agent_py_spec = importlib.util.spec_from_file_location("agent_cli", _agent_py_path)
+agent_module = importlib.util.module_from_spec(_agent_py_spec)
+_agent_py_spec.loader.exec_module(agent_module)
 
 
 def _shutdown_browser(context, playwright, executor: ThreadPoolExecutor) -> None:

@@ -1,6 +1,20 @@
 import pytest
 
+from discord_adapter import config as config_module
 from discord_adapter.config import DiscordConfigError, load_config
+
+
+@pytest.fixture(autouse=True)
+def _no_real_env_file(monkeypatch, tmp_path):
+    """Every test in this file exercises presence/absence of specific env
+    vars via monkeypatch.setenv/delenv. Without this fixture, a real .env
+    on disk (e.g. a developer's own DISCORD_BOT_TOKEN/DISCORD_ALLOWED_USER_ID
+    for actually running the bot) would get reloaded by
+    _load_dotenv_if_present() and silently defeat delenv() -- python-dotenv
+    repopulates any var that isn't currently set in the process environment.
+    Pointing ENV_FILE at a path that doesn't exist makes these tests behave
+    identically regardless of what's in the developer's real .env."""
+    monkeypatch.setattr(config_module, "ENV_FILE", tmp_path / "nonexistent.env")
 
 
 def test_load_config_reads_required_fields(monkeypatch):
