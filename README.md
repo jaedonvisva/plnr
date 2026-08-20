@@ -45,20 +45,20 @@ flowchart TD
     GEMINI --> ANS
     ANS --> U
 
-    click A "agent.py" "CLI entry point"
-    click DB "discord_bot.py" "Discord DM entry point"
-    click DA "discord_adapter/bot.py" "Message handling, auth/DM gating, chunking"
-    click DS "discord_adapter/session.py" "Owns the agent loop per Discord session"
-    click AUTH "learn/auth.py" "Login-completion detection"
-    click BR "learn/browser.py" "Playwright persistent-context lifecycle"
-    click LC "learn/client.py" "LearnClient: Valence HTTP calls, typed errors"
-    click MODELS "learn/models.py" "Course/Assignment/Grade/Quiz/Announcement dataclasses"
-    click AGG "agent/aggregation.py" "Deterministic date filtering, search, sorting"
-    click TOOLS "agent/tools.py" "The only thing the LLM can call"
-    click LOOP "agent/loop.py" "Tool-calling loop, up to 20 rounds"
-    click BACKEND "agent/backend.py" "Resolves --model to a concrete backend"
-    click QWEN "agent/llm.py" "Local Ollama client config"
-    click GEMINI "agent/gemini_client.py" "The one cloud-API module, strictly opt-in"
+    click A "https://github.com/jaedonvisva/plnr/blob/main/agent.py" "CLI entry point" _blank
+    click DB "https://github.com/jaedonvisva/plnr/blob/main/discord_bot.py" "Discord DM entry point" _blank
+    click DA "https://github.com/jaedonvisva/plnr/blob/main/discord_adapter/bot.py" "Message handling, auth/DM gating, chunking" _blank
+    click DS "https://github.com/jaedonvisva/plnr/blob/main/discord_adapter/session.py" "Owns the agent loop per Discord session" _blank
+    click AUTH "https://github.com/jaedonvisva/plnr/blob/main/learn/auth.py" "Login-completion detection" _blank
+    click BR "https://github.com/jaedonvisva/plnr/blob/main/learn/browser.py" "Playwright persistent-context lifecycle" _blank
+    click LC "https://github.com/jaedonvisva/plnr/blob/main/learn/client.py" "LearnClient: Valence HTTP calls, typed errors" _blank
+    click MODELS "https://github.com/jaedonvisva/plnr/blob/main/learn/models.py" "Course/Assignment/Grade/Quiz/Announcement dataclasses" _blank
+    click AGG "https://github.com/jaedonvisva/plnr/blob/main/agent/aggregation.py" "Deterministic date filtering, search, sorting" _blank
+    click TOOLS "https://github.com/jaedonvisva/plnr/blob/main/agent/tools.py" "The only thing the LLM can call" _blank
+    click LOOP "https://github.com/jaedonvisva/plnr/blob/main/agent/loop.py" "Tool-calling loop, up to 20 rounds" _blank
+    click BACKEND "https://github.com/jaedonvisva/plnr/blob/main/agent/backend.py" "Resolves --model to a concrete backend" _blank
+    click QWEN "https://github.com/jaedonvisva/plnr/blob/main/agent/llm.py" "Local Ollama client config" _blank
+    click GEMINI "https://github.com/jaedonvisva/plnr/blob/main/agent/gemini_client.py" "The one cloud-API module, strictly opt-in" _blank
 ```
 
 Full hop-by-hop breakdown (with the "why" behind each box) in
