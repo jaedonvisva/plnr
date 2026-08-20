@@ -70,7 +70,11 @@ def test_ask_runs_on_the_executors_single_worker_thread_every_time():
 
 
 def test_ask_transitions_to_browser_failed_on_browser_closed_error():
+    call_count = 0
+
     def fake_run_turn(llm_client, model, messages, tools, debug, usage):
+        nonlocal call_count
+        call_count += 1
         raise BrowserClosedError("browser closed")
 
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -79,10 +83,12 @@ def test_ask_transitions_to_browser_failed_on_browser_closed_error():
 
         assert reply == UNAVAILABLE_MESSAGE
         assert session.state is SessionState.BROWSER_FAILED
+        assert call_count == 1
 
         # A second call must short-circuit without touching run_turn_fn again.
         reply2 = asyncio.run(session.ask("another question"))
     assert reply2 == UNAVAILABLE_MESSAGE
+    assert call_count == 1
 
 
 def test_ask_reports_unavailable_error_without_changing_state():
