@@ -133,14 +133,29 @@ class LearnDiscordClient(discord.Client):
         if message.author.bot:
             return
         is_dm = isinstance(message.channel, discord.DMChannel)
-        replies = await handle_incoming(
-            session=self._session,
-            rate_limiter=self._rate_limiter,
-            lock=self._lock,
-            config=self._config,
-            author_id=message.author.id,
-            is_dm=is_dm,
-            text=message.content,
-        )
+        is_authorized = is_dm and message.author.id == self._config.allowed_user_id
+
+        async def _handle() -> list[str]:
+            return await handle_incoming(
+                session=self._session,
+                rate_limiter=self._rate_limiter,
+                lock=self._lock,
+                config=self._config,
+                author_id=message.author.id,
+                is_dm=is_dm,
+                text=message.content,
+            )
+
+        # Discord's native "X is typing..." indicator, so a long run_turn()
+        # (multi-round tool calls) doesn't look like the bot went silent.
+        # Only shown to the authorized sender -- an unauthorized DM still
+        # gets zero visible reaction, matching handle_incoming()'s silent
+        # rejection.
+        if is_authorized:
+            async with message.channel.typing():
+                replies = await _handle()
+        else:
+            replies = await _handle()
+
         for chunk in replies:
             await message.channel.send(chunk)
