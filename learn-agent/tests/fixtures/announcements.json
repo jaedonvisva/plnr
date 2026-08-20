@@ -1,0 +1,14 @@
+[
+  {
+    "PinnedDate": null,
+    "Id": 900001,
+    "IsHidden": false,
+    "Attachments": [],
+    "CreatedBy": 123456,
+    "CreatedDate": "2026-08-07T15:16:43.733Z",
+    "LastModifiedBy": 123456,
+    "LastModifiedDate": "2026-08-07T15:18:32.507Z",
+    "Title": "Final Exam Updates",
+    "Body": {"Text": "See attached schedule.", "Html": "<p>See attached schedule.</p>"}
+  }
+]

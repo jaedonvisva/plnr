@@ -1,0 +1,18 @@
+[
+  {
+    "PointsNumerator": 8.5,
+    "PointsDenominator": 10.0,
+    "WeightedNumerator": 8.5,
+    "WeightedDenominator": 10.0,
+    "GradeObjectIdentifier": "700001",
+    "GradeObjectName": "Assignment 1 - Basics",
+    "GradeObjectType": 1,
+    "GradeObjectTypeName": "Numeric",
+    "DisplayedGrade": "85 %",
+    "Comments": {"Text": "Good work.", "Html": "<p>Good work.</p>"},
+    "PrivateComments": {"Text": "", "Html": ""},
+    "LastModified": "2026-05-20T14:00:00.000Z",
+    "LastModifiedBy": null,
+    "ReleasedDate": null
+  }
+]

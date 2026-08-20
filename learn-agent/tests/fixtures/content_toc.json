@@ -1,0 +1,79 @@
+{
+  "Modules": [
+    {
+      "IsHidden": false,
+      "SortOrder": 1,
+      "StartDateTime": null,
+      "EndDateTime": null,
+      "IsLocked": false,
+      "ModuleId": 600001,
+      "Title": "Week 1",
+      "Modules": [],
+      "Topics": [
+        {
+          "IsExempt": false,
+          "IsHidden": false,
+          "SortOrder": 1,
+          "IsLocked": false,
+          "IsBroken": false,
+          "ActivityId": "https://ids.brightspace.com/activities/contenttopic/uWaterloo-9100001",
+          "CompletionType": 2,
+          "TopicId": 610001,
+          "Identifier": "610001",
+          "TypeIdentifier": "Link",
+          "Title": "Course Outline",
+          "Bookmarked": false,
+          "Unread": false,
+          "Url": "https://outline.uwaterloo.ca/viewer/view/example",
+          "ToolId": null,
+          "ToolItemId": null,
+          "ActivityType": 2,
+          "GradeItemId": null,
+          "LastModifiedDate": "2026-05-11T13:37:41.690Z",
+          "Description": {"Text": "", "Html": ""}
+        },
+        {
+          "IsExempt": false,
+          "IsHidden": false,
+          "SortOrder": 2,
+          "IsLocked": false,
+          "IsBroken": false,
+          "TopicId": 610002,
+          "Identifier": "610002",
+          "TypeIdentifier": "File",
+          "Title": "Lecture Slides (no URL/grade link on this one)",
+          "Bookmarked": false,
+          "Unread": true,
+          "LastModifiedDate": "2026-05-11T14:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "IsHidden": false,
+      "SortOrder": 2,
+      "ModuleId": 600002,
+      "Title": "Week 2",
+      "Modules": [
+        {
+          "IsHidden": false,
+          "SortOrder": 1,
+          "ModuleId": 600003,
+          "Title": "Week 2 - Optional Extras",
+          "Modules": [],
+          "Topics": [
+            {
+              "TopicId": 610003,
+              "TypeIdentifier": "Link",
+              "Title": "Bonus Reading",
+              "Url": "https://example.com/bonus",
+              "GradeItemId": 700010,
+              "LastModifiedDate": "2026-05-18T09:00:00.000Z",
+              "Description": {"Text": "Optional.", "Html": "<p>Optional.</p>"}
+            }
+          ]
+        }
+      ],
+      "Topics": []
+    }
+  ]
+}

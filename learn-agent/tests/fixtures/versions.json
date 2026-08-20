@@ -1,0 +1,4 @@
+[
+  {"ProductCode": "le", "LatestVersion": "1.96", "SupportedVersions": ["1.75", "1.96"]},
+  {"ProductCode": "lp", "LatestVersion": "1.62", "SupportedVersions": ["1.47", "1.62"]}
+]

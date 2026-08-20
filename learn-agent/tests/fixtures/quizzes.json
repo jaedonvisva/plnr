@@ -1,0 +1,22 @@
+[
+  {
+    "QuizId": 800001,
+    "Name": "Quiz 1 - Fundamentals",
+    "AutoExportToGrades": true,
+    "IsActive": true,
+    "GradeItemId": 700010,
+    "IsAutoSetGraded": true,
+    "Instructions": {"Text": {"Text": "", "Html": ""}, "IsDisplayed": false},
+    "Description": {"Text": {"Text": "15 minutes, one attempt.", "Html": "<p>15 minutes, one attempt.</p>"}}
+  },
+  {
+    "QuizId": 800002,
+    "Name": "Quiz 2 - No Description",
+    "AutoExportToGrades": true,
+    "IsActive": false,
+    "GradeItemId": null,
+    "IsAutoSetGraded": false,
+    "Instructions": {"Text": {"Text": "", "Html": ""}, "IsDisplayed": false},
+    "Description": {"Text": {"Text": "", "Html": ""}}
+  }
+]

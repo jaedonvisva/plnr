@@ -1,0 +1,45 @@
+{
+  "PagingInfo": {"Bookmark": null, "HasMoreItems": false},
+  "Items": [
+    {
+      "OrgUnit": {
+        "Id": 6606,
+        "Type": {"Id": 1, "Code": "Organization", "Name": "Organization"},
+        "Name": "University of Waterloo",
+        "Code": null,
+        "HomeUrl": "https://learn.uwaterloo.ca/d2l/home/6606",
+        "ImageUrl": "https://learn.uwaterloo.ca/d2l/api/lp/1.9/courses/6606/image"
+      },
+      "Access": {
+        "IsActive": true,
+        "StartDate": null,
+        "EndDate": null,
+        "CanAccess": true,
+        "ClasslistRoleName": "Student",
+        "LISRoles": [],
+        "LastAccessed": "2026-08-18T04:03:31.830Z"
+      },
+      "PinDate": null
+    },
+    {
+      "OrgUnit": {
+        "Id": 1000001,
+        "Type": {"Id": 3, "Code": "Course Offering", "Name": "Course Offering"},
+        "Name": "Intro to Widgets - Spring 2026",
+        "Code": "WIDG101_smith_1265",
+        "HomeUrl": "https://learn.uwaterloo.ca/d2l/home/1000001",
+        "ImageUrl": "https://learn.uwaterloo.ca/d2l/api/lp/1.47/courses/1000001/image"
+      },
+      "Access": {
+        "IsActive": true,
+        "StartDate": "2026-05-11T04:00:00.000Z",
+        "EndDate": "2026-09-09T04:00:00.000Z",
+        "CanAccess": true,
+        "ClasslistRoleName": "Student",
+        "LISRoles": ["urn:lti:instrole:ims/lis/Student"],
+        "LastAccessed": "2026-08-17T13:22:10.000Z"
+      },
+      "PinDate": null
+    }
+  ]
+}
