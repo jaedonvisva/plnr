@@ -2,8 +2,6 @@ import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-import pytest
-
 from agent.backend import Backend
 from agent.usage import Usage
 from discord_adapter.session import AgentSession, SessionState, UNAVAILABLE_MESSAGE
@@ -100,6 +98,18 @@ def test_ask_reports_unavailable_error_without_changing_state():
         reply = asyncio.run(session.ask("question"))
 
     assert "temporarily unavailable" in reply
+    assert session.state is SessionState.RUNNING
+
+
+def test_ask_catches_unexpected_exception_and_stays_running():
+    def fake_run_turn(llm_client, model, messages, tools, debug, usage):
+        raise RuntimeError("boom")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        session = make_session(fake_run_turn, executor)
+        reply = asyncio.run(session.ask("question"))
+
+    assert "went wrong" in reply.lower()
     assert session.state is SessionState.RUNNING
 
 

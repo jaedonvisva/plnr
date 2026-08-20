@@ -64,12 +64,25 @@ def load_config() -> DiscordConfig:
             f"DISCORD_ALLOWED_USER_ID must be an integer, got: {raw_user_id!r}"
         ) from None
 
-    max_per_minute = int(
-        os.environ.get("DISCORD_MAX_MESSAGES_PER_MINUTE", DEFAULT_MAX_MESSAGES_PER_MINUTE)
+    raw_max_per_minute = os.environ.get(
+        "DISCORD_MAX_MESSAGES_PER_MINUTE", DEFAULT_MAX_MESSAGES_PER_MINUTE
     )
-    max_per_hour = int(
-        os.environ.get("DISCORD_MAX_MESSAGES_PER_HOUR", DEFAULT_MAX_MESSAGES_PER_HOUR)
+    try:
+        max_per_minute = int(raw_max_per_minute)
+    except ValueError:
+        raise DiscordConfigError(
+            f"DISCORD_MAX_MESSAGES_PER_MINUTE must be an integer, got: {raw_max_per_minute!r}"
+        ) from None
+
+    raw_max_per_hour = os.environ.get(
+        "DISCORD_MAX_MESSAGES_PER_HOUR", DEFAULT_MAX_MESSAGES_PER_HOUR
     )
+    try:
+        max_per_hour = int(raw_max_per_hour)
+    except ValueError:
+        raise DiscordConfigError(
+            f"DISCORD_MAX_MESSAGES_PER_HOUR must be an integer, got: {raw_max_per_hour!r}"
+        ) from None
 
     return DiscordConfig(
         bot_token=token,

@@ -134,13 +134,6 @@ def connect_and_authenticate(
 
         client = LearnClient(context)
         tools = build_tools(client)
-    except AgentStartupError:
-        try:
-            context.close()
-        except Exception:
-            pass
-        playwright.stop()
-        raise
     except Exception:
         try:
             context.close()

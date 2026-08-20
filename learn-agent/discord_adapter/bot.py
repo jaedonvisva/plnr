@@ -79,6 +79,9 @@ async def handle_incoming(
 
     stripped = text.strip()
 
+    if not stripped:
+        return []
+
     if len(stripped) > MAX_INCOMING_MESSAGE_LENGTH:
         return [TOO_LONG_MESSAGE_TEMPLATE.format(length=len(stripped))]
 
@@ -98,7 +101,8 @@ async def handle_incoming(
 
     async with lock:
         reply = await session.ask(stripped)
-    return chunk_message(reply)
+    chunks = [c for c in chunk_message(reply) if c.strip()]
+    return chunks or ["(no response)"]
 
 
 class LearnDiscordClient(discord.Client):

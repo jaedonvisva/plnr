@@ -58,6 +58,10 @@ class AgentSession:
         if self.state is SessionState.BROWSER_FAILED:
             return UNAVAILABLE_MESSAGE
 
+        # NOTE: if any except branch below returns early, self.messages is
+        # left ending in an unanswered user turn (no assistant reply was
+        # appended). This is a known, accepted limitation -- the
+        # user-facing recovery is `!reset` (handled in discord_adapter/bot.py).
         self.messages.append({"role": "user", "content": text})
         turn_usage = Usage()
         loop = asyncio.get_running_loop()
@@ -78,6 +82,9 @@ class AgentSession:
             return UNAVAILABLE_MESSAGE
         except self._backend.unavailable_error as exc:
             return f"{self._backend.name} is temporarily unavailable: {exc}. Try asking again."
+        except Exception as exc:  # noqa: BLE001 -- one bad turn must never kill the bot
+            print(f"Unexpected error during turn: {type(exc).__name__}: {exc}")
+            return "Something went wrong handling that question. Try again."
 
         self.usage.add_usage(turn_usage)
         return reply

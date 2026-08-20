@@ -1,7 +1,5 @@
 import asyncio
 
-import pytest
-
 from discord_adapter.bot import (
     BUSY_MESSAGE,
     RATE_LIMITED_MESSAGE,
@@ -200,6 +198,72 @@ def test_ordinary_question_is_asked_and_chunked():
     )
     assert session.asked == ["what's due this week?"]
     assert replies == ["short answer"]
+
+
+def test_empty_reply_from_session_ask_becomes_no_response_placeholder():
+    session = FakeSession(reply="")
+    replies = asyncio.run(
+        handle_incoming(
+            session=session,
+            rate_limiter=AlwaysAllowRateLimiter(),
+            lock=asyncio.Lock(),
+            config=make_config(),
+            author_id=42,
+            is_dm=True,
+            text="what's due this week?",
+        )
+    )
+    assert replies == ["(no response)"]
+
+
+def test_whitespace_only_reply_from_session_ask_becomes_no_response_placeholder():
+    session = FakeSession(reply="   \n  ")
+    replies = asyncio.run(
+        handle_incoming(
+            session=session,
+            rate_limiter=AlwaysAllowRateLimiter(),
+            lock=asyncio.Lock(),
+            config=make_config(),
+            author_id=42,
+            is_dm=True,
+            text="what's due this week?",
+        )
+    )
+    assert replies == ["(no response)"]
+
+
+def test_empty_message_returns_no_replies_and_never_calls_session_ask():
+    session = FakeSession()
+    replies = asyncio.run(
+        handle_incoming(
+            session=session,
+            rate_limiter=AlwaysAllowRateLimiter(),
+            lock=asyncio.Lock(),
+            config=make_config(),
+            author_id=42,
+            is_dm=True,
+            text="",
+        )
+    )
+    assert replies == []
+    assert session.asked == []
+
+
+def test_whitespace_only_message_returns_no_replies_and_never_calls_session_ask():
+    session = FakeSession()
+    replies = asyncio.run(
+        handle_incoming(
+            session=session,
+            rate_limiter=AlwaysAllowRateLimiter(),
+            lock=asyncio.Lock(),
+            config=make_config(),
+            author_id=42,
+            is_dm=True,
+            text="   \n\t  ",
+        )
+    )
+    assert replies == []
+    assert session.asked == []
 
 
 def test_chunk_message_splits_long_text_without_exceeding_limit():

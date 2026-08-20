@@ -33,6 +33,29 @@ from discord_adapter.config import DiscordConfigError, load_config
 from discord_adapter.session import AgentSession
 
 
+def _shutdown_browser(context, playwright, executor: ThreadPoolExecutor) -> None:
+    """Close the Playwright context and stop Playwright itself, both on
+    the executor's single worker thread -- the same thread that created
+    them. Playwright's sync API is thread-affine (see AgentSession's
+    docstring in discord_adapter/session.py); calling context.close() or
+    playwright.stop() from any other thread raises
+    `greenlet.error: Cannot switch to a different thread` on stop(), and
+    silently no-ops close() under the bare `except Exception: pass` here.
+    Blocks up to 30s for cleanup to finish before giving up."""
+
+    def _cleanup():
+        try:
+            context.close()
+        except Exception:
+            pass
+        playwright.stop()
+
+    try:
+        executor.submit(_cleanup).result(timeout=30)
+    except Exception as exc:
+        print(f"Browser cleanup failed: {exc}")
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -51,7 +74,7 @@ def main() -> None:
 
     executor = ThreadPoolExecutor(max_workers=1)
     try:
-        context, playwright, learn_client, tools = executor.submit(
+        context, playwright, _learn_client, tools = executor.submit(
             agent_module.connect_and_authenticate, backend
         ).result()
     except agent_module.AgentStartupError as exc:
@@ -72,11 +95,7 @@ def main() -> None:
     try:
         client.run(discord_config.bot_token)
     finally:
-        try:
-            context.close()
-        except Exception:
-            pass
-        playwright.stop()
+        _shutdown_browser(context, playwright, executor)
         executor.shutdown(wait=False)
 
 

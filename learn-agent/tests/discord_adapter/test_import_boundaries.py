@@ -2,6 +2,7 @@ import ast
 from pathlib import Path
 
 BOT_PY = Path(__file__).resolve().parent.parent.parent / "discord_adapter" / "bot.py"
+DISCORD_BOT_PY = BOT_PY.parent.parent / "discord_bot.py"
 
 
 def _imported_module_names() -> set[str]:
@@ -27,3 +28,12 @@ def test_bot_module_never_imports_learn_or_agent_tools():
 def test_agent_session_is_never_constructed_inside_bot_module():
     source = BOT_PY.read_text()
     assert "AgentSession(" not in source
+
+
+def test_agent_session_constructed_exactly_once_in_entry_point():
+    tree = ast.parse(DISCORD_BOT_PY.read_text())
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "AgentSession"
+    ]
+    assert len(calls) == 1

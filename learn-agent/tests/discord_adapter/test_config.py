@@ -51,3 +51,12 @@ def test_load_config_raises_when_allowed_user_id_not_an_integer(monkeypatch):
 
     with pytest.raises(DiscordConfigError):
         load_config()
+
+
+def test_load_config_raises_when_max_messages_per_minute_not_an_integer(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "fake-token")
+    monkeypatch.setenv("DISCORD_ALLOWED_USER_ID", "123456789")
+    monkeypatch.setenv("DISCORD_MAX_MESSAGES_PER_MINUTE", "not-a-number")
+
+    with pytest.raises(DiscordConfigError):
+        load_config()
