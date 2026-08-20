@@ -48,7 +48,6 @@ anywhere in this codebase, regardless of which LLM backend is selected.
 
 ```bash
 git clone <this repo>   # or just cd into it if you already have it
-cd learn-agent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -181,7 +180,7 @@ LEARN's own frontend JavaScript uses.
 ## Project structure
 
 ```
-learn-agent/
+.
 ├── agent.py                  # CLI entry point: --model, interactive agent, `--test-llm`, `logout` subcommand
 ├── conftest.py                # makes `learn`/`agent` importable for pytest regardless of invocation dir
 ├── requirements.txt            # playwright, pytest, python-dotenv, ollama, google-genai
