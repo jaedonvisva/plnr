@@ -87,13 +87,28 @@ def run_test_llm(backend: backend_module.Backend) -> None:
         print(f"\n[tokens: {prompt_tokens or 0:,} in / {completion_tokens or 0:,} out]")
 
 
-def run_interactive_agent(backend: backend_module.Backend, debug: bool = False) -> None:
-    """Full interactive agent, using the existing auth flow unmodified."""
-    print("LEARN Agent")
-    print("───────────")
+class AgentStartupError(Exception):
+    """Raised by connect_and_authenticate() if LEARN authentication doesn't
+    complete -- either the browser was closed early, or the wait timed out.
+    The browser context is already closed and playwright already stopped
+    before this is raised, so the caller has nothing left to clean up."""
 
-    llm_client = _connect(backend)
 
+def connect_and_authenticate(
+    backend: backend_module.Backend,
+) -> tuple[object, object, LearnClient, dict]:
+    """Launch the browser, complete WatIAM/Duo auth (with optional
+    credential auto-fill), and build a ready-to-use LearnClient + tool set.
+
+    Returns (context, playwright, learn_client, tools). On success, the
+    CALLER owns `context`/`playwright` and is responsible for calling
+    context.close() and playwright.stop() when done (mirrors
+    learn/browser.py::launch_browser()'s existing contract). On failure,
+    raises AgentStartupError, having already closed the browser and
+    stopped playwright itself -- shared by run_interactive_agent() (the
+    CLI) and discord_bot.py, so this security-relevant wiring exists in
+    exactly one place.
+    """
     print("\nOpening LEARN...")
     context, playwright = browser.launch_browser()
     try:
@@ -110,17 +125,39 @@ def run_interactive_agent(backend: backend_module.Backend, debug: bool = False) 
         try:
             authenticated = auth.wait_for_authentication(page)
         except auth.BrowserClosedError as exc:
-            print(f"\n{exc}")
-            return
+            raise AgentStartupError(str(exc)) from exc
 
         if not authenticated:
-            print("\nTimed out waiting for LEARN authentication.")
-            return
+            raise AgentStartupError("Timed out waiting for LEARN authentication.")
 
         print("LEARN authentication ✓\n")
+    except AgentStartupError:
+        try:
+            context.close()
+        except Exception:
+            pass
+        playwright.stop()
+        raise
 
-        client = LearnClient(context)
-        tools = build_tools(client)
+    client = LearnClient(context)
+    tools = build_tools(client)
+    return context, playwright, client, tools
+
+
+def run_interactive_agent(backend: backend_module.Backend, debug: bool = False) -> None:
+    """Full interactive agent, using the existing auth flow unmodified."""
+    print("LEARN Agent")
+    print("───────────")
+
+    llm_client = _connect(backend)
+
+    try:
+        context, playwright, client, tools = connect_and_authenticate(backend)
+    except AgentStartupError as exc:
+        print(f"\n{exc}")
+        return
+
+    try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         session_usage = Usage()
 
@@ -146,10 +183,6 @@ def run_interactive_agent(backend: backend_module.Backend, debug: bool = False) 
                 print("\nThe browser was closed. Restart the agent to continue.")
                 break
             except backend.unavailable_error as exc:
-                # Transient backend failure (e.g. Gemini's "high demand,
-                # try again later" 503) -- not a bug, and not a reason to
-                # kill the whole session. Your question is still the last
-                # message in history; just ask again.
                 print(f"\n{backend.name} is temporarily unavailable: {exc}")
                 print("Try asking again.\n")
                 continue
