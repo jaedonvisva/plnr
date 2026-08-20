@@ -6,6 +6,7 @@ from discord_adapter.bot import (
     RESET_CONFIRMATION,
     TOO_LONG_MESSAGE_TEMPLATE,
     chunk_message,
+    convert_markdown_tables,
     format_status,
     handle_incoming,
 )
@@ -198,6 +199,77 @@ def test_ordinary_question_is_asked_and_chunked():
     )
     assert session.asked == ["what's due this week?"]
     assert replies == ["short answer"]
+
+
+def test_ordinary_question_with_table_reply_is_converted_before_chunking():
+    session = FakeSession(
+        reply=(
+            "Deadlines:\n\n"
+            "| Assignment | Due Date |\n"
+            "| :--- | :--- |\n"
+            "| Lab1 | May 16, 2026 |\n"
+            "| Project | August 14, 2026 |\n"
+        )
+    )
+    replies = asyncio.run(
+        handle_incoming(
+            session=session,
+            rate_limiter=AlwaysAllowRateLimiter(),
+            lock=asyncio.Lock(),
+            config=make_config(),
+            author_id=42,
+            is_dm=True,
+            text="what's due?",
+        )
+    )
+    assert len(replies) == 1
+    assert "|" not in replies[0]
+    assert "```" in replies[0]
+
+
+def test_convert_markdown_tables_leaves_non_table_text_untouched():
+    text = "Just a normal reply with no pipes or tables."
+    assert convert_markdown_tables(text) == text
+
+
+def test_convert_markdown_tables_wraps_table_in_code_block_and_aligns_columns():
+    text = (
+        "Deadlines:\n\n"
+        "| Assignment | Due Date |\n"
+        "| :--- | :--- |\n"
+        "| Lab1_Take-Home Activity | May 16, 2026 |\n"
+        "| Project | August 14, 2026 |\n"
+        "\nLet me know if you need more."
+    )
+    result = convert_markdown_tables(text)
+
+    assert "|" not in result
+    assert result.count("```") == 2
+    assert "Assignment" in result
+    assert "Lab1_Take-Home Activity" in result
+    assert "Let me know if you need more." in result
+    # code block content should be padded/aligned, not raw pipe cells
+    code_block = result.split("```")[1]
+    lines = [line for line in code_block.strip("\n").splitlines()]
+    header_col_start = lines[0].index("Due Date")
+    row_col_start = lines[2].index("May 16, 2026")
+    assert header_col_start == row_col_start
+
+
+def test_convert_markdown_tables_handles_multiple_tables():
+    text = (
+        "| A | B |\n"
+        "|---|---|\n"
+        "| 1 | 2 |\n"
+        "\ntext between\n\n"
+        "| C | D |\n"
+        "|---|---|\n"
+        "| 3 | 4 |\n"
+    )
+    result = convert_markdown_tables(text)
+    assert result.count("```") == 4
+    assert "text between" in result
+    assert "|" not in result
 
 
 def test_empty_reply_from_session_ask_becomes_no_response_placeholder():

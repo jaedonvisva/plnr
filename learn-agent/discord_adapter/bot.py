@@ -12,6 +12,7 @@ subclass) is a thin wrapper that extracts the real fields and calls it.
 """
 
 import asyncio
+import re
 
 import discord
 
@@ -19,6 +20,64 @@ from discord_adapter.config import MAX_INCOMING_MESSAGE_LENGTH, DiscordConfig
 from discord_adapter.ratelimit import RateLimiter
 
 DISCORD_MESSAGE_LIMIT = 2000
+
+_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$")
+
+
+def _split_table_row(line: str) -> list[str]:
+    stripped = line.strip().strip("|")
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def convert_markdown_tables(text: str) -> str:
+    """Rewrite GitHub-flavored markdown tables (which Discord renders as
+    raw pipe-delimited text, not an actual table) into padded, monospaced
+    tables wrapped in a fenced code block. The LLM is instructed not to
+    emit tables at all, but that's a request, not a guarantee -- this is
+    the mechanical backstop that keeps tabular replies legible in Discord
+    even when the model ignores it."""
+    lines = text.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if (
+            "|" in line
+            and i + 1 < len(lines)
+            and _TABLE_SEPARATOR_RE.match(lines[i + 1])
+        ):
+            header = _split_table_row(line)
+            rows = []
+            j = i + 2
+            while j < len(lines) and "|" in lines[j] and lines[j].strip():
+                rows.append(_split_table_row(lines[j]))
+                j += 1
+
+            widths = [len(cell) for cell in header]
+            for row in rows:
+                for idx, cell in enumerate(row):
+                    if idx >= len(widths):
+                        widths.append(len(cell))
+                    else:
+                        widths[idx] = max(widths[idx], len(cell))
+
+            def render(row: list[str]) -> str:
+                padded = [
+                    row[idx].ljust(widths[idx]) if idx < len(row) else " " * widths[idx]
+                    for idx in range(len(widths))
+                ]
+                return "  ".join(padded).rstrip()
+
+            table_lines = [render(header), "  ".join("-" * w for w in widths)]
+            table_lines.extend(render(row) for row in rows)
+            out.append("```")
+            out.extend(table_lines)
+            out.append("```")
+            i = j
+        else:
+            out.append(line)
+            i += 1
+    return "\n".join(out)
 
 TOO_LONG_MESSAGE_TEMPLATE = (
     "That message is too long ({length} characters, limit " f"{MAX_INCOMING_MESSAGE_LENGTH})."
@@ -101,6 +160,7 @@ async def handle_incoming(
 
     async with lock:
         reply = await session.ask(stripped)
+    reply = convert_markdown_tables(reply)
     chunks = [c for c in chunk_message(reply) if c.strip()]
     return chunks or ["(no response)"]
 
