@@ -9,17 +9,60 @@ your courses, assignments, grades, quizzes, and announcements by calling a
 small set of **read-only** tools against Brightspace's documented API.
 Nothing here can click, submit, or change anything — every call is a `GET`.
 
-```
-you  →  real browser login  →  session cookies  →  Valence REST API
-     ←  natural-language answer  ←  LLM + tool calls  ←  typed course data
-```
-
 By default, questions and LEARN data go to Google's Gemini API
 (`--model qwen` keeps everything local via Ollama instead — see
 [Quick start](#quick-start)).
 
 Curious how it actually works, what broke during live testing, or what's
 left to build? → [HANDOFF.md](HANDOFF.md)
+
+---
+
+## Architecture
+
+Click any box to jump to the file that implements it.
+
+```mermaid
+flowchart TD
+    U([You]) -->|terminal| A[agent.py]
+    U -->|Discord DM| DB[discord_bot.py]
+    DB --> DA["discord_adapter/bot.py"]
+    DA --> DS["discord_adapter/session.py"]
+
+    A --> AUTH["WatIAM + Duo<br/>(visible browser, self-login)"]
+    DS --> AUTH
+    AUTH --> BR["learn/browser.py<br/>persistent context → .auth/"]
+    BR --> LC["learn/client.py<br/>LearnClient (GET-only)"]
+    LC --> VAPI[("Valence REST API<br/>learn.uwaterloo.ca")]
+    VAPI --> MODELS["learn/models.py<br/>typed domain models"]
+    MODELS --> AGG["agent/aggregation.py<br/>cross-course filter/search"]
+    AGG --> TOOLS["agent/tools.py<br/>LLM-callable tool whitelist"]
+    TOOLS --> LOOP["agent/loop.py<br/>tool-calling loop"]
+    LOOP --> BACKEND["agent/backend.py<br/>picks a backend from --model"]
+    BACKEND --> QWEN["agent/llm.py<br/>Qwen · local · opt-in"]
+    BACKEND --> GEMINI["agent/gemini_client.py<br/>Gemini · cloud · default"]
+    QWEN --> ANS([Answer])
+    GEMINI --> ANS
+    ANS --> U
+
+    click A "agent.py" "CLI entry point"
+    click DB "discord_bot.py" "Discord DM entry point"
+    click DA "discord_adapter/bot.py" "Message handling, auth/DM gating, chunking"
+    click DS "discord_adapter/session.py" "Owns the agent loop per Discord session"
+    click AUTH "learn/auth.py" "Login-completion detection"
+    click BR "learn/browser.py" "Playwright persistent-context lifecycle"
+    click LC "learn/client.py" "LearnClient: Valence HTTP calls, typed errors"
+    click MODELS "learn/models.py" "Course/Assignment/Grade/Quiz/Announcement dataclasses"
+    click AGG "agent/aggregation.py" "Deterministic date filtering, search, sorting"
+    click TOOLS "agent/tools.py" "The only thing the LLM can call"
+    click LOOP "agent/loop.py" "Tool-calling loop, up to 20 rounds"
+    click BACKEND "agent/backend.py" "Resolves --model to a concrete backend"
+    click QWEN "agent/llm.py" "Local Ollama client config"
+    click GEMINI "agent/gemini_client.py" "The one cloud-API module, strictly opt-in"
+```
+
+Full hop-by-hop breakdown (with the "why" behind each box) in
+[HANDOFF.md's architecture diagram](HANDOFF.md#full-architecture-diagram).
 
 ---
 
