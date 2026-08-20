@@ -11,12 +11,100 @@ security model).
 
 ## Table of contents
 
-1. [Module-by-module reference](#module-by-module-reference)
-2. [Key engineering decisions, and why](#key-engineering-decisions-and-why)
-3. [Bugs found during live testing (and their fixes)](#bugs-found-during-live-testing-and-their-fixes)
-4. [Testing, in depth](#testing-in-depth)
-5. [Known limitations / open items](#known-limitations--open-items)
-6. [How to continue this project](#how-to-continue-this-project)
+1. [Full architecture diagram](#full-architecture-diagram)
+2. [Module-by-module reference](#module-by-module-reference)
+3. [Key engineering decisions, and why](#key-engineering-decisions-and-why)
+4. [Bugs found during live testing (and their fixes)](#bugs-found-during-live-testing-and-their-fixes)
+5. [Testing, in depth](#testing-in-depth)
+6. [Known limitations / open items](#known-limitations--open-items)
+7. [How to continue this project](#how-to-continue-this-project)
+
+---
+
+## Full architecture diagram
+
+README.md has the short version. This is the hop-by-hop breakdown.
+
+```
+┌─────────────────────────┐
+│         User             │  runs the agent.py CLI (or DMs the Discord bot)
+└───────────┬──────────────┘  and asks a question
+            │
+            ▼
+┌─────────────────────────┐
+│   Waterloo WatIAM + Duo   │  the user completes this themselves, in a real
+│  (visible Chromium window)│  visible browser window. This code never fills
+└───────────┬──────────────┘  or reads the login form (unless .env opt-in
+            │                  auto-fill is enabled — see below).
+            ▼
+┌─────────────────────────┐
+│  Playwright BrowserContext│  learn/browser.py: launch_persistent_context()
+│  (persisted to .auth/)    │  learn/auth.py: waits for authentication,
+└───────────┬──────────────┘  detects it via a LIVE window.location.href
+            │                  read, not Playwright's cached page.url
+            ▼
+┌─────────────────────────┐
+│  context.request           │  Playwright's APIRequestContext, sharing the
+│  (Playwright's HTTP client)│  SAME cookie jar as the browser above. This
+└───────────┬──────────────┘  IS the entire Valence authentication
+            │                  mechanism — plain cookies, no OAuth, no
+            │                  API key. See client.py docstring.
+            ▼
+┌─────────────────────────┐
+│      LearnClient           │  learn/client.py: 7 read-only methods,
+│  (learn/client.py)          │  GET-only, typed errors (401→auth error,
+└───────────┬──────────────┘  403→empty list), normalizes raw JSON into...
+            │
+            ▼
+┌─────────────────────────┐
+│  Valence REST API           │  Brightspace's documented API
+│  (learn.uwaterloo.ca/d2l/  │  (/d2l/api/lp/..., /d2l/api/le/...)
+│   api/...)                  │
+└───────────┬──────────────┘
+            │
+            ▼
+┌─────────────────────────┐
+│  Domain models               │  learn/models.py: Course, Assignment,
+│  (learn/models.py)            │  Grade, Quiz, Announcement, ContentItem
+└───────────┬──────────────┘  — frozen dataclasses, typed, no D2L jargon
+            │
+            ▼
+┌─────────────────────────┐
+│  agent/aggregation.py        │  cross-course date filtering, text search,
+│  (deterministic Python)      │  sorting -- Python does this, not the LLM
+└───────────┬──────────────┘
+            │
+            ▼
+┌─────────────────────────┐
+│  agent/tools.py (LLM-facing)│  serializes to plain dict (agent/serialize.py),
+│                              │  strips `.raw`, truncates rich-text fields
+└───────────┬──────────────┘
+            │
+            ▼
+┌─────────────────────────┐
+│  agent/loop.py               │  tool-calling loop (up to 20 rounds),
+│                              │  typed error handling -- backend-agnostic
+└───────────┬──────────────┘
+            │
+            ▼
+┌─────────────────────────┐
+│  agent/backend.py            │  resolves --model to a backend (see
+│  (picks ONE, at launch)      │  agent/llm.py vs agent/gemini_client.py)
+└───────────┬──────────────┘
+            │
+      ┌─────┴─────┐
+      ▼           ▼
+┌───────────┐ ┌───────────────┐
+│ Qwen 3 8B │ │ Gemini         │
+│ (Ollama,  │ │ (Google's      │
+│ local,    │ │ cloud API --   │
+│ default   │ │ DEFAULT unless │
+│ off)      │ │ --model qwen)  │
+└─────┬─────┘ └───────┬───────┘
+      └───────┬───────┘
+              ▼
+      natural-language answer → User (terminal or Discord DM)
+```
 
 ---
 
