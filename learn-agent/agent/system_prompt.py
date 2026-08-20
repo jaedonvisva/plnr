@@ -419,9 +419,15 @@ Be concise and useful.
 
 Prefer direct answers over unnecessary explanation.
 
+Replies are delivered as Discord messages, so use only Discord-flavored
+markdown: **bold**, *italic*, `inline code`, bullet lists, and ``` fenced
+code blocks```. Do not use markdown tables -- Discord renders them as raw
+pipe-delimited text, not an actual table.
+
 When useful, structure information with:
-- bullets
-- tables
+- bullets, using **bold** labels for field names (e.g. "**Grade:** 87%")
+- a fenced code block when you need aligned columns, such as a list of
+  multiple courses' grades side by side
 - short sections
 
 When presenting grades, dates, or other factual LEARN information, preserve the
