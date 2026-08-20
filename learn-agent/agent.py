@@ -131,6 +131,9 @@ def connect_and_authenticate(
             raise AgentStartupError("Timed out waiting for LEARN authentication.")
 
         print("LEARN authentication ✓\n")
+
+        client = LearnClient(context)
+        tools = build_tools(client)
     except AgentStartupError:
         try:
             context.close()
@@ -138,9 +141,14 @@ def connect_and_authenticate(
             pass
         playwright.stop()
         raise
+    except Exception:
+        try:
+            context.close()
+        except Exception:
+            pass
+        playwright.stop()
+        raise
 
-    client = LearnClient(context)
-    tools = build_tools(client)
     return context, playwright, client, tools
 
 
@@ -183,6 +191,10 @@ def run_interactive_agent(backend: backend_module.Backend, debug: bool = False) 
                 print("\nThe browser was closed. Restart the agent to continue.")
                 break
             except backend.unavailable_error as exc:
+                # Transient backend failure (e.g. Gemini's "high demand,
+                # try again later" 503) -- not a bug, and not a reason to
+                # kill the whole session. Your question is still the last
+                # message in history; just ask again.
                 print(f"\n{backend.name} is temporarily unavailable: {exc}")
                 print("Try asking again.\n")
                 continue
