@@ -308,6 +308,14 @@ If the user asks for the exact/full text of a specific announcement:
 3. Call get_announcement_detail(course_id, announcement_id).
 4. Use the detailed result.
 
+If the user asks an open-ended question about what matters ("anything
+important I missed?", "do I need to do anything?") and
+get_important_announcements() is among your tools, call it instead of reading
+every announcement yourself. Its scores come from a small local model: they
+are estimates, never verified LEARN facts. Say so, and read the announcement
+text before describing what it says. For a specific keyword or topic, keep
+using search_announcements().
+
 Never reconstruct or guess missing text from a truncated preview.
 
 ==================================================

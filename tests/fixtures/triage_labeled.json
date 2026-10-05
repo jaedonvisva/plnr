@@ -1,0 +1,15 @@
+{
+  "_comment": "SYNTHETIC seed examples. Append real announcements (title/body/important) from your own courses before trusting any threshold.",
+  "items": [
+    {"title": "Midterm moved to Thursday", "body": "<p>Due to a room conflict the midterm is now Thursday 7pm in RCH 101.</p>", "important": true},
+    {"title": "Assignment 2 deadline extended", "body": "<p>The deadline is now Friday 11:59pm. Submit via Crowdmark.</p>", "important": true},
+    {"title": "Please complete the course survey", "body": "<p>You must fill out the mandatory safety quiz before the lab on Monday.</p>", "important": true},
+    {"title": "Final exam location posted", "body": "<p>The final will be in PAC. Bring your WatCard.</p>", "important": true},
+    {"title": "Lab 3 cancelled this week", "body": "<p>The TA is ill; Lab 3 sessions are cancelled. Submit your work online instead.</p>", "important": true},
+    {"title": "Welcome to the course", "body": "<p>Hi everyone, excited to meet you. Office hours are listed on the syllabus.</p>", "important": false},
+    {"title": "Lecture slides uploaded", "body": "<p>Week 3 slides are now in the content area.</p>", "important": false},
+    {"title": "Reminder: office hours Wednesday", "body": "<p>Usual office hours at 2pm, nothing has changed.</p>", "important": false},
+    {"title": "Great job on the quiz", "body": "<p>The class average was strong. Keep it up!</p>", "important": false},
+    {"title": "Textbook available in the library", "body": "<p>A copy is on reserve if you do not want to buy one.</p>", "important": false}
+  ]
+}

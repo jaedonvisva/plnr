@@ -89,6 +89,14 @@ python discord_bot.py           # chat over Discord DM instead
 | `python agent.py logout` | Wipe the saved LEARN session |
 | `python agent.py --test-llm` | Check LLM connectivity only, no browser |
 
+**Optional: announcement triage.** `pip install -r requirements-triage.txt`
+adds a local decision model ([Laya](https://huggingface.co/convaiinnovations/laya),
+torch + ~800 MB of weights) and one extra tool, `get_important_announcements`,
+so "anything I need to act on?" returns a short ranked list instead of every
+announcement. Scores are estimates, not LEARN facts. Run
+`python scripts/eval_triage.py` on your own labeled announcements to check
+accuracy before trusting a threshold (the bundled fixture is synthetic).
+
 `.env.example` has the full list of optional config (`GEMINI_API_KEY`,
 `DISCORD_BOT_TOKEN` + `DISCORD_ALLOWED_USER_ID`, optional WatIAM auto-fill).
 
@@ -102,7 +110,8 @@ discord_bot.py        Discord DM entry point
 learn/                 auth + Brightspace API client, normalized into typed models
 agent/                  LLM tool layer + the tool-calling loop (Qwen or Gemini)
 discord_adapter/         Discord transport — DM gating, rate limiting, chunking
-tests/                    177 tests, fully offline
+tests/                    200+ tests, fully offline
+scripts/                   eval_triage.py — measure triage accuracy (manual)
 ```
 
 ---
@@ -120,6 +129,9 @@ tests/                    177 tests, fully offline
   Google unless you pass `--model qwen`, which keeps everything local.
 - **Discord bot replies to exactly one user ID.** Everyone else gets
   silence, not an error.
+- **Triage stays local.** If installed, announcement scoring runs on your
+  machine even under `--model gemini`; only the filtered results reach the
+  chat model, like every other tool.
 - **Zero write capability**, anywhere, for either backend.
 
 Design rationale behind these choices is in [HANDOFF.md](HANDOFF.md).

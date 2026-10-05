@@ -40,7 +40,7 @@ from collections.abc import Callable
 
 from learn.client import LearnClient
 
-from . import aggregation
+from . import aggregation, triage
 from .course_registry import CourseRegistry
 from .serialize import serialize as _serialize
 
@@ -50,6 +50,10 @@ unbounded-length argument the model could otherwise pass through untouched
 to a search function -- defense-in-depth, not because anything downstream
 is unsafe with a long string, but an LLM should never be able to hand an
 arbitrarily large payload to a tool argument."""
+
+DEFAULT_TRIAGE_MIN_SCORE = 0.5
+DEFAULT_TRIAGE_LIMIT = 10
+MAX_TRIAGE_LIMIT = 50
 
 MAX_DAYS_AHEAD = 365
 """get_upcoming_items(days_ahead): generous enough for "next term" style
@@ -71,8 +75,12 @@ def _course_id_error(course_id) -> dict | None:
     return None
 
 
-def build_tools(client: LearnClient) -> dict[str, Callable]:
+def build_tools(client: LearnClient, decider: triage.Decider | None = None) -> dict[str, Callable]:
     """Build the LEARN tool set bound to one authenticated LearnClient.
+
+    `decider` (see agent/triage.py) enables the optional
+    get_important_announcements tool; without one that tool is not
+    registered at all.
 
     Returns a name -> callable mapping. Pass list(tools.values()) to
     ollama's `tools=` argument; use the dict to look up a tool by the name
@@ -277,6 +285,53 @@ def build_tools(client: LearnClient) -> dict[str, Callable]:
         courses = registry.refresh()
         return aggregation.search_course_content(client, courses, query, course_id)
 
+    def get_important_announcements(
+        course_id: str | None = None,
+        min_score: float = DEFAULT_TRIAGE_MIN_SCORE,
+        limit: int = DEFAULT_TRIAGE_LIMIT,
+    ) -> dict:
+        """List only the announcements that likely need the student's
+        attention (deadline/exam/location changes, things they must do),
+        ranked most important first, across all active courses or one.
+
+        Use this for open-ended questions like "anything important I
+        missed?", "is there anything I need to act on?", or "any urgent
+        announcements?". For a specific keyword or topic, use
+        search_announcements() instead.
+
+        Each result carries a "score" (0-1) and "signals" produced by a small
+        local model. These are ESTIMATES, not LEARN facts -- never present a
+        score as certain, and read the announcement text itself before
+        stating what it says.
+
+        course_id: optional. Omit to cover all active courses.
+        min_score: only return items scoring at least this (0-1, default
+        0.5). limit: max items returned (1-50, default 10).
+
+        Every course checked is listed in "courses_checked", even ones with
+        nothing important (in "courses_with_no_results")."""
+        if course_id is not None:
+            err = _require_known_course(course_id)
+            if err:
+                return err
+        if isinstance(min_score, bool) or not isinstance(min_score, (int, float)) or not (0 <= min_score <= 1):
+            return {"error": True, "type": "tool_error", "message": "min_score must be a number between 0 and 1."}
+        if isinstance(limit, bool) or not isinstance(limit, int) or not (1 <= limit <= MAX_TRIAGE_LIMIT):
+            return {
+                "error": True,
+                "type": "tool_error",
+                "message": f"limit must be an integer between 1 and {MAX_TRIAGE_LIMIT}.",
+            }
+        courses = registry.refresh()
+        try:
+            return triage.triage_announcements(client, courses, decider, course_id, float(min_score), limit)
+        except Exception as exc:
+            return {
+                "error": True,
+                "type": "triage_unavailable",
+                "message": f"Announcement triage failed ({type(exc).__name__}); use search_announcements() instead.",
+            }
+
     tools = [
         get_courses,
         get_assignments,
@@ -289,4 +344,6 @@ def build_tools(client: LearnClient) -> dict[str, Callable]:
         search_announcements,
         search_course_content,
     ]
+    if decider is not None:
+        tools.append(get_important_announcements)
     return {fn.__name__: fn for fn in tools}

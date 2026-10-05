@@ -1,0 +1,4 @@
+# Optional: local announcement triage (agent/triage.py). Not needed otherwise.
+# Pulls in torch + ~800 MB of model weights on first use.
+-r requirements.txt
+laya

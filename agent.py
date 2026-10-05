@@ -31,6 +31,7 @@ each backend does and does not send anywhere.
 import sys
 
 from agent import backend as backend_module
+from agent import triage
 from agent.loop import run_turn
 from agent.system_prompt import SYSTEM_PROMPT
 from agent.tools import build_tools
@@ -133,7 +134,10 @@ def connect_and_authenticate(
         print("LEARN authentication ✓\n")
 
         client = LearnClient(context)
-        tools = build_tools(client)
+        decider = triage.default_decider()
+        if decider is not None:
+            print("Announcement triage ✓ (local)\n")
+        tools = build_tools(client, decider=decider)
     except Exception:
         try:
             context.close()
