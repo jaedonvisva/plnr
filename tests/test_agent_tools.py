@@ -6,7 +6,7 @@ from learn.models import Announcement, Assignment, ContentItem, Course
 
 class FakeLearnClient:
     """Stands in for LearnClient -- the tool layer must not care that this
-    isn't the real thing, since it never touches Playwright/BrowserContext
+    isn't the real thing, since it never touches the transport or session
     itself."""
 
     def __init__(self):
@@ -94,6 +94,9 @@ def test_get_courses_serializes_to_plain_dict_without_raw():
             "is_active": True,
             "url": "https://learn.uwaterloo.ca/d2l/home/1",
             "last_accessed_at": "2026-08-18T12:00:00+00:00",
+            "display_code": None,
+            "term": None,
+            "term_label": None,
         }
     ]
     # No dataclass or datetime object should have leaked through, and the

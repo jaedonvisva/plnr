@@ -18,7 +18,7 @@ class LearnApiError(Exception):
 
 class LearnAuthenticationError(LearnApiError):
     """The session is missing or expired (HTTP 401). The caller should
-    re-authenticate (re-run the Playwright login flow) rather than treat
+    re-authenticate (`python agent.py auth`) rather than treat
     this as "no data"."""
 
 
@@ -33,3 +33,12 @@ class LearnToolUnavailableError(LearnApiError):
     shape in every case observed so far. This exception covers both; see
     the client's module docstring for details.
     """
+
+
+class LoginError(Exception):
+    """Interactive sign-in (browser/CDP or cookie paste) did not produce a verified session.
+    Distinct from LearnAuthenticationError, which is an API call finding the session expired."""
+
+
+class BrowserNotFound(LoginError):
+    """No Chrome/Edge/Chromium executable could be located for dedicated-browser sign-in."""

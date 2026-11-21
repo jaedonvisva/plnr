@@ -35,9 +35,9 @@ WATERLOO_TZ = ZoneInfo("America/Toronto")
 DEFAULT_UPCOMING_WINDOW_DAYS = 14
 
 QUIZ_DUE_DATE_NOTE = (
-    "Quiz due dates are not available in LEARN's structured data for this "
-    "account, so quizzes are not included in this result. Use "
-    "get_quizzes(course_id) to list quizzes without due-date filtering."
+    "Quizzes are included only when LEARN gives them a structured DueDate; "
+    "a quiz without one is NOT listed here, so absence is not proof nothing is "
+    "due. Use get_quizzes(course_id) to list every quiz in a course."
 )
 
 
@@ -77,10 +77,11 @@ def collect_upcoming_assignments(
     days_ahead: int,
     now: datetime,
 ) -> dict[str, Any]:
-    """Gather Assignment items across active courses whose structured
-    `due_at` falls within [now, now + days_ahead]. Quizzes are excluded --
-    see QUIZ_DUE_DATE_NOTE. Errors fetching one course's assignments don't
-    abort the others; they're reported per-course in "errors".
+    """Gather assignments and quizzes across active courses whose structured
+    `due_at` falls within [now, now + days_ahead]. A quiz is only included when
+    LEARN provides a DueDate for it -- see QUIZ_DUE_DATE_NOTE. Errors fetching
+    one course's data don't abort the others; they're reported per-course in
+    "errors".
     """
     active_courses = [c for c in courses if c.is_active]
     window_end = now + timedelta(days=days_ahead)
@@ -92,14 +93,30 @@ def collect_upcoming_assignments(
     for course in active_courses:
         try:
             assignments = client.get_assignments(course.id)
+            quizzes = client.get_quizzes(course.id)
         except LearnApiError as exc:
             errors.append({**_course_ref(course), "message": str(exc)})
             continue
 
         matches = [a for a in assignments if a.due_at is not None and now <= a.due_at <= window_end]
-        if not matches:
+        quiz_matches = [q for q in quizzes if q.due_at is not None and now <= q.due_at <= window_end]
+        if not matches and not quiz_matches:
             courses_with_no_results.append(_course_ref(course))
             continue
+
+        for q in quiz_matches:
+            items.append(
+                {
+                    UNTRUSTED_MARKER_KEY: UNTRUSTED_MARKER_VALUE,  # q.name is instructor-controlled text
+                    "type": "quiz",
+                    **_course_ref(course),
+                    "id": q.id,
+                    "name": q.name,
+                    "due_at": q.due_at.isoformat(),
+                    "is_active": q.is_active,
+                    "source": "structured_quiz_data",
+                }
+            )
 
         for a in matches:
             items.append(

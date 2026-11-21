@@ -2,11 +2,11 @@ import pytest
 
 from learn.client import LearnClient
 from learn.exceptions import LearnApiError, LearnAuthenticationError, LearnToolUnavailableError
-from tests.fake_valence import load_fixture, make_context
+from tests.fake_valence import load_fixture, make_transport
 
 
 def client_with(extra_routes: dict) -> LearnClient:
-    return LearnClient(make_context(extra_routes))
+    return LearnClient(make_transport(extra_routes))
 
 
 # ---- Courses -----------------------------------------------------------

@@ -361,3 +361,43 @@ def test_format_status_never_includes_course_data():
     assert "gemini" in text
     assert "1,234" in text
     assert "running" in text
+
+
+def _route(text, handler, author_id=42):
+    session = FakeSession()
+    out = asyncio.run(
+        handle_incoming(
+            session=session,
+            rate_limiter=AlwaysAllowRateLimiter(),
+            lock=asyncio.Lock(),
+            config=make_config(),
+            author_id=author_id,
+            is_dm=True,
+            text=text,
+            command_handler=handler,
+            reply_to_id=7,
+        )
+    )
+    return out, session
+
+
+def test_proactive_commands_are_answered_without_the_model():
+    seen = []
+
+    def handler(text, reply_to_id):
+        seen.append((text, reply_to_id))
+        return "Marked done." if text == "done 1" else None
+
+    out, session = _route("done 1", handler)
+    assert out == ["Marked done."] and session.asked == [] and seen == [("done 1", 7)]
+
+
+def test_non_commands_fall_through_to_the_model():
+    out, session = _route("what is A4 about?", lambda text, reply_to_id: None)
+    assert out == ["the answer"] and session.asked == ["what is A4 about?"]
+
+
+def test_commands_from_other_users_are_never_handled():
+    called = []
+    out, _ = _route("done 1", lambda *a: called.append(a), author_id=999)
+    assert out == [] and called == []

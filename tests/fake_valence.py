@@ -1,7 +1,7 @@
 """Minimal fakes for LearnClient's HTTP dependency, so tests never touch the
 network or require real Waterloo credentials.
 
-LearnClient only ever calls `context.request.get(url)` and reads
+LearnClient only ever calls `transport.get(url)` and reads
 `.status` / `.ok` / `.json()` off the result -- these fakes implement
 exactly that surface, nothing more.
 """
@@ -26,7 +26,7 @@ class FakeResponse:
         return self._body
 
 
-class FakeAPIRequestContext:
+class FakeTransport:
     """routes: dict mapping a URL substring -> (status, body). First
     substring match wins; raises AssertionError if nothing matches, so a
     test can't accidentally pass by hitting an unconfigured route."""
@@ -43,18 +43,13 @@ class FakeAPIRequestContext:
         raise AssertionError(f"No fake route configured for URL: {url}")
 
 
-class FakeBrowserContext:
-    def __init__(self, routes: dict):
-        self.request = FakeAPIRequestContext(routes)
-
-
-def make_context(extra_routes: dict) -> FakeBrowserContext:
-    """Build a FakeBrowserContext with the /d2l/api/versions/ route
+def make_transport(extra_routes: dict) -> FakeTransport:
+    """Build a fake transport with the /d2l/api/versions/ route
     pre-configured (every LearnClient call needs it), plus whatever
     extra routes a test passes in, e.g.:
 
-        make_context({"dropbox/folders": (200, load_fixture("dropbox_folders.json"))})
+        make_transport({"dropbox/folders": (200, load_fixture("dropbox_folders.json"))})
     """
     routes = {"/d2l/api/versions/": (200, load_fixture("versions.json"))}
     routes.update(extra_routes)
-    return FakeBrowserContext(routes)
+    return FakeTransport(routes)

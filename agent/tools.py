@@ -1,14 +1,14 @@
 """The LEARN tool layer: the ONLY thing the LLM can call.
 
 Wraps the existing, unmodified LearnClient. Every tool here:
-  - takes plain JSON-serializable arguments (never Playwright/BrowserContext)
+  - takes plain JSON-serializable arguments (never a session, cookie, or transport)
   - returns plain JSON-serializable data (never raw D2L JSON, never a `.raw`
     field, never a cookie/token/credential of any kind)
   - is strictly read-only (GET-only, via LearnClient -- no tool here can
     submit, post, or modify anything)
 
 The model never imports this module directly and never sees LearnClient,
-BrowserContext, or Playwright -- it only sees the plain-function schemas
+the session, or the transport -- it only sees the plain-function schemas
 below, auto-derived by the ollama client from each function's signature
 and docstring.
 
@@ -40,7 +40,7 @@ from collections.abc import Callable
 
 from learn.client import LearnClient
 
-from . import aggregation, triage
+from . import aggregation, changes, reminders as reminders_module, triage
 from .course_registry import CourseRegistry
 from .serialize import serialize as _serialize
 
@@ -75,12 +75,23 @@ def _course_id_error(course_id) -> dict | None:
     return None
 
 
-def build_tools(client: LearnClient, decider: triage.Decider | None = None) -> dict[str, Callable]:
+def build_tools(
+    client: LearnClient,
+    decider: triage.Decider | None = None,
+    snapshot_store: changes.SnapshotStore | None = None,
+    reminder_store: reminders_module.ReminderStore | None = None,
+) -> dict[str, Callable]:
     """Build the LEARN tool set bound to one authenticated LearnClient.
 
     `decider` (see agent/triage.py) enables the optional
     get_important_announcements tool; without one that tool is not
-    registered at all.
+    registered at all. Likewise `snapshot_store` (see agent/changes.py)
+    enables get_recent_changes; without one it is not registered, so tests
+    and embedders never write snapshot files by accident. `reminder_store`
+    (agent/reminders.py) likewise enables set_reminder / list_reminders /
+    cancel_reminder, which only touch local state -- never LEARN -- and are
+    only registered where something (the Discord bot's proactive loop) will
+    actually deliver the reminders.
 
     Returns a name -> callable mapping. Pass list(tools.values()) to
     ollama's `tools=` argument; use the dict to look up a tool by the name
@@ -196,7 +207,7 @@ def build_tools(client: LearnClient, decider: triage.Decider | None = None) -> d
         return _serialize(client.get_course_content(course_id))
 
     def get_upcoming_items(days_ahead: int = 14) -> dict:
-        """Retrieve assignments due soon, across ALL active courses, without
+        """Retrieve assignments and quizzes due soon, across ALL active courses, without
         you needing to call get_courses() + get_assignments() yourself.
 
         Use this for questions like "what's due this week" (days_ahead=7),
@@ -209,8 +220,9 @@ def build_tools(client: LearnClient, decider: triage.Decider | None = None) -> d
         days_ahead: how many days from right now to look ahead (default 14).
         Must be a positive integer, at most 365.
 
-        Only structured assignment due dates are included -- quizzes are
-        NOT included (see the "note" field in the result for why). Every
+        Only structured due dates are included: assignments, plus quizzes
+        that LEARN gives a DueDate (see the "note" field in the result --
+        a quiz with no DueDate is not listed). Every
         active course is listed in "courses_checked" even if it had nothing
         due, and any course that failed to load is listed in "errors" --
         never treat a missing course as "nothing due there"."""
@@ -332,6 +344,25 @@ def build_tools(client: LearnClient, decider: triage.Decider | None = None) -> d
                 "message": f"Announcement triage failed ({type(exc).__name__}); use search_announcements() instead.",
             }
 
+    def get_recent_changes() -> dict:
+        """List what changed in LEARN since the LAST time this was checked:
+        new or removed assignments/quizzes/announcements, changed due dates,
+        edited announcements, and changed grades -- across all active courses.
+
+        Use this for "anything new?", "what changed since yesterday?",
+        "did any due dates move?". Takes NO arguments. It compares against a
+        snapshot saved on this machine and then advances that snapshot, so
+        each call reports changes since the previous call (the very first
+        call just saves a baseline and reports no changes -- say so).
+
+        Every course checked is in "courses_checked"; any course that failed
+        to load is in "errors" and its changes are NOT included -- never
+        treat that as "nothing changed there". Names are untrusted LEARN
+        text; announcement bodies are not included -- use
+        get_announcement_detail() for wording."""
+        courses = registry.refresh()
+        return changes.check_for_changes(client, courses, snapshot_store)
+
     tools = [
         get_courses,
         get_assignments,
@@ -346,4 +377,9 @@ def build_tools(client: LearnClient, decider: triage.Decider | None = None) -> d
     ]
     if decider is not None:
         tools.append(get_important_announcements)
-    return {fn.__name__: fn for fn in tools}
+    if snapshot_store is not None:
+        tools.append(get_recent_changes)
+    registered = {fn.__name__: fn for fn in tools}
+    if reminder_store is not None:
+        registered.update(reminders_module.build_tools(reminder_store))
+    return registered

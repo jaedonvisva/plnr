@@ -1,14 +1,14 @@
 # Discord DM Adapter for the LEARN Agent
 
-Status: approved by user, pending implementation plan.
+Status: implemented.
 
 ## Goal
 
 Add Discord DMs as a second, portable frontend to the existing LEARN agent,
 without modifying any of the existing agent/auth/tool/security code. One
 command starts the process; it authenticates against LEARN exactly as
-`agent.py` does today (visible Chromium, manual WatIAM + Duo); once
-authenticated it starts listening for DMs from one authorized Discord user
+`agent.py` does today (stored session, or a dedicated-browser WatIAM + Duo
+sign-in); once authenticated it starts listening for DMs from one authorized Discord user
 and answers questions via the existing `run_turn()` path.
 
 Eventual goal (out of scope for this milestone, but shapes the design): this
@@ -18,15 +18,13 @@ agent service. Nothing in this milestone should make that harder.
 
 ## Non-goals / explicit constraints
 
-- Do not modify `LearnClient`, `learn/browser.py`, `learn/auth.py`,
-  `learn/credentials.py`, `CourseRegistry`, `TurnGuard`, `agent/tools.py`,
+- Do not modify `LearnClient`, `learn/auth.py`, `CourseRegistry`, `TurnGuard`, `agent/tools.py`,
   `agent/serialize.py`, `agent/system_prompt.py`, `agent/loop.py`'s
   `run_turn()` semantics, or the Gemini/Ollama backend adapters.
 - No alternate tool-execution path. Every LEARN-derived answer goes through
   the exact same `run_turn()` → `TurnGuard` → whitelisted tool →
   `CourseRegistry`/validation → `LearnClient` chain the CLI already uses.
-- No macOS-specific code in the new adapter. (The existing Playwright launch
-  in `learn/browser.py` is already cross-platform and is not touched here.)
+- No macOS-specific code in the new adapter.
 - Single authorized user, DMs only. No multi-user support, no server/channel
   support, in this milestone.
 - No cross-process/cross-restart persistence of conversation history — only
@@ -66,7 +64,7 @@ adapter.
   `DISCORD_ALLOWED_USER_ID` (int), and optional
   `DISCORD_MAX_MESSAGES_PER_MINUTE` / `DISCORD_MAX_MESSAGES_PER_HOUR`
   overrides from `.env` via `python-dotenv`, same pattern as
-  `learn/credentials.py`/`agent/gemini_client.py`. Fails with a clear error
+  `agent/gemini_client.py`. Fails with a clear error
   if the token or allowed-user-id is missing — mirrors
   `agent/llm.py`/`agent/gemini_client.py`'s `check_connection` pattern of
   failing loudly at startup, not at first use.
@@ -74,32 +72,27 @@ adapter.
   - Constructed with an already-authenticated `LearnClient`, the built
     `tools` dict, the connected LLM client, and the resolved `Backend`.
   - Owns a `concurrent.futures.ThreadPoolExecutor(max_workers=1)` — the
-    **exclusive owner** of everything Playwright-derived from this point
+    **exclusive owner** of everything LEARN-derived from this point
     on. Nothing outside `AgentSession` ever touches `LearnClient`, the
     `tools` callables, or `run_turn()` directly.
-  - State machine: `RUNNING` → `BROWSER_FAILED` (one-way; no automatic
-    recovery — see Error handling below).
+  - State: `RUNNING`.
   - `messages: list[dict]` (starts as `[{"role": "system", "content":
     SYSTEM_PROMPT}]`) and `usage: Usage`, exactly mirroring the CLI's
     locals today, but owned by the session instead of being loop-local
     variables in `agent.py`.
   - `async def ask(self, text: str) -> str` — the only entry point the
-    adapter calls for a real question. Internally: if state is
-    `BROWSER_FAILED`, return a fixed unavailable message without touching
-    the executor. Otherwise append the user message, call
+    adapter calls for a real question. Internally: append the user message, call
     `run_turn(llm_client, model, self.messages, self.tools, usage=turn_usage)`
     via `loop.run_in_executor(self._executor, ...)`, add `turn_usage` into
     `self.usage`, and return the reply string. Catches
-    `auth.BrowserClosedError` (transitions state to `BROWSER_FAILED`,
-    returns the fixed unavailable message) and `backend.unavailable_error`
-    (state unchanged, returns a "try again" message) — same two branches
-    `run_interactive_agent()` already has, just returning strings instead
-    of printing.
+    `backend.unavailable_error` (returns a "try again" message) — the same
+    branch `run_interactive_agent()` already has, just returning a string
+    instead of printing.
   - `def reset(self) -> None` — resets `messages` to just the system
     prompt and `usage` to a fresh `Usage()`. Synchronous, no executor
-    needed (doesn't touch Playwright/LearnClient).
+    needed (doesn't touch LearnClient).
   - `def status(self) -> dict` — returns non-sensitive state only:
-    backend name/model, session state (`running`/`browser_failed`),
+    backend name/model, session state (`running`),
     message count in the conversation, total tokens used this session.
     Never includes course data, tokens/cookies, or raw messages.
 - **`discord_adapter/bot.py`** (new) — a `discord.py` `discord.Client`
@@ -167,14 +160,12 @@ adapter.
      `bot.run(config.discord_token)` — this call blocks the main thread
      running `discord.py`'s asyncio loop for the life of the process.
   - Startup prints the same kind of explicit checklist the CLI already
-    prints (LLM connect ✓, browser opening, LEARN auth ✓) plus a final
+    prints (LLM connect ✓, LEARN session ✓ / sign-in, triage) plus a final
     "Discord bot connecting..." / "listening" line, so the sequence is
     visible when running this unattended in a terminal.
-- **Mechanical extraction in `agent.py`** — the "connect LLM → launch
-  browser → complete auth → build `LearnClient`/`tools`" block currently
-  inlined in `run_interactive_agent()` (lines ~95-124) is pulled out into a
-  small helper, e.g. `agent.py::connect_and_authenticate(backend) ->
-  (context, playwright, learn_client, tools)`, used by both
+- **Mechanical extraction in `agent.py`** — the "reuse or obtain a LEARN
+  session → build `LearnClient`/`tools`" block is a small helper,
+  `agent.py::connect_and_authenticate(backend) -> (learn_client, tools)`, used by both
   `run_interactive_agent()` (CLI, unchanged behavior) and `discord_bot.py`.
   Pure extraction — no logic changes, so this isn't "rewriting the agent",
   it's making sure the security-relevant wiring exists in exactly one
@@ -182,33 +173,22 @@ adapter.
 
 ## Threading model
 
-`run_turn()`, `LearnClient` (via `context.request`), and Playwright's sync
-API are blocking and thread-affine: the sync API must be driven from the
-one thread that created it. `discord.py` needs its asyncio event loop free
-to service heartbeats. Resolution:
+`run_turn()` and `LearnClient` make blocking HTTP calls, while `discord.py`
+needs its asyncio event loop free to service heartbeats. Resolution:
 
 - The `ThreadPoolExecutor(max_workers=1)` inside `AgentSession` is created
-  once, and its single worker thread is the one used for **every**
-  `run_turn()` call for the life of the process (guaranteed by
-  `max_workers=1` always reusing the same thread for sequential
-  submissions).
-- The **browser launch and auth wait also happen in this worker thread**
-  in the final design (submitted to the executor from `discord_bot.py`'s
-  startup code and awaited synchronously before proceeding) — not the
-  main thread — so that literally everything Playwright-derived,
-  including the initial launch, lives on one thread for the rest of the
-  process's life. `discord_bot.py`'s main thread only ever does: build
-  config, submit startup work to the executor, block on the result, then
-  hand off to `bot.run()`.
+  once, and its single worker thread runs **every** `run_turn()` call for the
+  life of the process (`max_workers=1` always reuses the same thread for
+  sequential submissions), so turns are serialized.
 - Invariant, enforced by comment + test: the asyncio side (`bot.py`) never
-  directly references `context`, `page`, `LearnClient`, any Playwright
-  object, or a tool callable — only `AgentSession.ask/reset/status`.
+  directly references `LearnClient`, the session, or a tool callable — only
+  `AgentSession.ask/reset/status`.
 
 ## Error handling
 
 | Condition | Behavior |
 |---|---|
-| `auth.BrowserClosedError` during a turn | `AgentSession` transitions to `BROWSER_FAILED`. Reply: "LEARN session unavailable — restart the agent." All subsequent `ask()` calls short-circuit to the same message without touching the executor. No auto-recovery, no second Playwright context — restart is manual. |
+| LEARN session expires during a turn | `SessionTransport` re-runs sign-in once and retries (see `learn/transport.py`). If that fails, the tool returns an `authentication_expired` result and the model tells the user; fix with `python agent.py auth`. |
 | `backend.unavailable_error` (transient LLM 503 etc.) | State unchanged. Reply: "{backend} is temporarily unavailable, try asking again." Lock released, ready for the next message. |
 | Any other unexpected exception inside `ask()` | Caught at the `AgentSession` boundary, logged to stdout, generic reply sent, process stays alive — never let one bad turn kill the bot (same philosophy as `_execute_tool()`'s catch-all in `agent/loop.py`, applied one layer up). |
 | Auth fails/times out at startup | Process exits before `bot.run()` is ever called — the bot is never visibly online with a broken backend. |
@@ -238,10 +218,7 @@ Following the existing "all offline" pattern:
   is called.
 - Chunking: a reply over 2000 chars is split into multiple sends, none
   exceeding the limit.
-- `AgentSession.ask()`: `BrowserClosedError` → state transitions to
-  `BROWSER_FAILED` and a second `ask()` call short-circuits without
-  touching the (fake) executor/backend again; `backend.unavailable_error`
-  → state stays `RUNNING`.
+- `AgentSession.ask()`: `backend.unavailable_error` → state stays `RUNNING`.
 - Import-boundary test: `discord_adapter/bot.py` does not import
   `learn.*`, `agent.tools`, or `agent.course_registry` (AST-based check
   over the module source, not a runtime assertion).
@@ -261,6 +238,4 @@ Following the existing "all offline" pattern:
 - Persisting conversation history across process restarts.
 - Auto-restart/process supervision (systemd/launchd) — noted as a future
   option, not built here.
-- Any change to `learn/browser.py` for cross-platform behavior — it's
-  already cross-platform via Playwright; this milestone doesn't need to
-  touch it.
+- Notifying the user over Discord when a sign-in needs their attention.

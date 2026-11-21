@@ -1,10 +1,12 @@
 """Read-only LEARN data client -- the normalization boundary.
 
 All methods here call Brightspace's *documented* Valence REST API
-(`/d2l/api/lp/...` and `/d2l/api/le/...`), authenticated by the same
-session cookies the user's own browser login established (via Playwright's
-`context.request`, which shares the context's cookie jar automatically).
-See learn/browser.py and learn/auth.py for that flow -- unchanged here.
+(`/d2l/api/lp/...` and `/d2l/api/le/...`), authenticated by the session
+cookies the user's own browser login established. Those cookies are stored
+by learn/session.py and replayed over plain HTTP by learn/transport.py's
+SessionTransport; this client only needs a transport with `.get(url)`
+returning an object with `.status`, `.ok` and `.json()`. See learn/auth.py
+for the login flow.
 
 No write operations are implemented or attempted. No HTML scraping is used --
 every endpoint below was verified live to return structured JSON.
@@ -24,22 +26,27 @@ distinct from "you're not logged in". Any other non-2xx response raises
 LearnApiError.
 """
 
-from urllib.parse import urlencode
-
-from playwright.sync_api import BrowserContext
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from .exceptions import LearnApiError, LearnAuthenticationError, LearnToolUnavailableError
-from .models import Announcement, Assignment, ContentItem, Course, Grade, Quiz, parse_iso8601
+from . import terms
+from .models import Announcement, Assignment, Attachment, ContentItem, Course, Grade, Quiz, parse_iso8601
 
 BASE_URL = "https://learn.uwaterloo.ca"
 COURSE_OFFERING_TYPE_ID = 3
+MAX_PAGES = 50
+"""Hard ceiling on pages followed for one collection (guards a server that keeps
+returning a next link). Hitting it raises rather than returning a partial list."""
 
 
 class LearnClient:
-    """Read-only wrapper around LEARN's authenticated Valence REST API."""
+    """Read-only wrapper around LEARN's authenticated Valence REST API.
 
-    def __init__(self, context: BrowserContext):
-        self._request = context.request
+    `transport` is any object with `.get(url)` (see learn/transport.py)."""
+
+    def __init__(self, transport):
+        self._request = transport
+        self.transport = transport
         self._le_version = None
         self._lp_version = None
 
@@ -94,36 +101,96 @@ class LearnClient:
         except LearnToolUnavailableError:
             return None
 
+    def _get_collection(self, url: str) -> list:
+        """GET a list endpoint, following pagination to the end.
+
+        Handles the shapes Valence uses: a bare array, `{"Objects": [...], "Next": url}`,
+        and `{"Items": [...], "PagingInfo": {"HasMoreItems", "Bookmark"}}`. Never returns a
+        partial list as if it were complete: a repeated page, an unexpected shape, a
+        cross-origin next link, or too many pages raises LearnApiError instead, so callers
+        (and the cross-course tools' per-course "errors") see the failure.
+        """
+        items: list = []
+        seen: set[str] = set()
+        current = url
+        for _ in range(MAX_PAGES):
+            if current in seen:
+                raise LearnApiError("LEARN pagination repeated a page.", url=current)
+            seen.add(current)
+            page, next_url = self._split_page(self._get(current), current)
+            items.extend(page)
+            if next_url is None:
+                return items
+            current = next_url
+        raise LearnApiError(f"LEARN pagination exceeded {MAX_PAGES} pages.", url=url)
+
+    def _collection_or_empty(self, url: str) -> list | None:
+        """Like _get_collection(), but a 403 (tool disabled / no permission) -> None."""
+        try:
+            return self._get_collection(url)
+        except LearnToolUnavailableError:
+            return None
+
+    @staticmethod
+    def _split_page(data, current: str) -> tuple[list, str | None]:
+        if isinstance(data, list):
+            return data, None
+        if isinstance(data, dict):
+            if isinstance(data.get("Objects"), list):
+                return data["Objects"], LearnClient._next_route(data.get("Next"), current)
+            if isinstance(data.get("Items"), list):
+                paging = data.get("PagingInfo")
+                if paging is None:
+                    return data["Items"], LearnClient._next_route(data.get("Next"), current)
+                if not isinstance(paging, dict) or not isinstance(paging.get("HasMoreItems"), bool):
+                    raise LearnApiError("LEARN returned an invalid PagingInfo.", url=current)
+                if not paging["HasMoreItems"]:
+                    return data["Items"], None
+                bookmark = paging.get("Bookmark")
+                if not isinstance(bookmark, str) or not bookmark:
+                    raise LearnApiError("LEARN paging has more items but no bookmark.", url=current)
+                parts = urlsplit(current)
+                query = [(k, v) for k, v in parse_qsl(parts.query) if k != "bookmark"]
+                query.append(("bookmark", bookmark))
+                return data["Items"], urlunsplit(parts._replace(query=urlencode(query)))
+        raise LearnApiError("LEARN returned an unexpected collection shape.", url=current)
+
+    @staticmethod
+    def _next_route(value, current: str) -> str | None:
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str):
+            raise LearnApiError("LEARN returned an invalid next link.", url=current)
+        resolved = urljoin(BASE_URL + "/", value)
+        if urlsplit(resolved).netloc != urlsplit(BASE_URL).netloc:
+            raise LearnApiError("LEARN next link points to a different host.", url=current)
+        return resolved
+
     def get_courses(self) -> list[Course]:
         """Return the authenticated user's active course offerings."""
         _, lp_version = self._versions()
         courses = []
-        bookmark = None
-        while True:
-            url = f"{BASE_URL}/d2l/api/lp/{lp_version}/enrollments/myenrollments/"
-            if bookmark:
-                url += f"?{urlencode({'bookmark': bookmark})}"
-            data = self._get(url)
-            for item in data["Items"]:
-                org_unit = item["OrgUnit"]
-                if org_unit["Type"]["Id"] != COURSE_OFFERING_TYPE_ID:
-                    continue
-                access = item["Access"]
-                courses.append(
-                    Course(
-                        id=str(org_unit["Id"]),
-                        name=org_unit["Name"],
-                        code=org_unit.get("Code"),
-                        is_active=access["IsActive"],
-                        url=org_unit["HomeUrl"],
-                        last_accessed_at=parse_iso8601(access.get("LastAccessed")),
-                        raw=item,
-                    )
+        for item in self._get_collection(f"{BASE_URL}/d2l/api/lp/{lp_version}/enrollments/myenrollments/"):
+            org_unit = item["OrgUnit"]
+            if org_unit["Type"]["Id"] != COURSE_OFFERING_TYPE_ID:
+                continue
+            access = item["Access"]
+            code = org_unit.get("Code")
+            term = terms.term_from_code(code)
+            courses.append(
+                Course(
+                    id=str(org_unit["Id"]),
+                    name=org_unit["Name"],
+                    code=code,
+                    is_active=access["IsActive"],
+                    url=org_unit["HomeUrl"],
+                    last_accessed_at=parse_iso8601(access.get("LastAccessed")),
+                    display_code=terms.display_code(code),
+                    term=term,
+                    term_label=terms.term_label(term),
+                    raw=item,
                 )
-            paging = data["PagingInfo"]
-            if not paging["HasMoreItems"]:
-                break
-            bookmark = paging["Bookmark"]
+            )
         return courses
 
     def get_assignments(self, course_id: str) -> list[Assignment]:
@@ -134,7 +201,7 @@ class LearnClient:
         enabled.
         """
         le_version, _ = self._versions()
-        folders = self._get_or_empty(f"{BASE_URL}/d2l/api/le/{le_version}/{course_id}/dropbox/folders/")
+        folders = self._collection_or_empty(f"{BASE_URL}/d2l/api/le/{le_version}/{course_id}/dropbox/folders/")
         if not folders:
             return []
 
@@ -157,10 +224,36 @@ class LearnClient:
                     points_earned=grade.points_earned if grade else None,
                     points_possible=grade.points_possible if grade else None,
                     is_hidden=f.get("IsHidden", False),
+                    attachments=self._attachments(f),
                     raw=f,
                 )
             )
         return assignments
+
+    @staticmethod
+    def _attachments(folder: dict) -> list[Attachment]:
+        raw = folder.get("Attachments")
+        if isinstance(raw, dict):
+            raw = raw.get("Items", raw.get("Objects"))
+        if not isinstance(raw, list):
+            return []
+        result = []
+        for a in raw:
+            if not isinstance(a, dict):
+                continue
+            ident = a.get("Id", a.get("FileId"))
+            name = a.get("FileName") or a.get("Name") or a.get("Title")
+            if ident is None or not isinstance(name, str) or not name:
+                continue
+            size = a.get("Size")
+            result.append(
+                Attachment(
+                    id=str(ident),
+                    name=name,
+                    size_bytes=size if isinstance(size, int) and not isinstance(size, bool) else None,
+                )
+            )
+        return result
 
     def get_grades(self, course_id: str) -> list[Grade]:
         """Return the authenticated user's own grade values for a course.
@@ -168,7 +261,7 @@ class LearnClient:
         Returns an empty list if this course doesn't have Grades enabled.
         """
         le_version, _ = self._versions()
-        values = self._get_or_empty(f"{BASE_URL}/d2l/api/le/{le_version}/{course_id}/grades/values/myGradeValues/")
+        values = self._collection_or_empty(f"{BASE_URL}/d2l/api/le/{le_version}/{course_id}/grades/values/myGradeValues/")
         if not values:
             return []
         return [self._to_grade(v, course_id) for v in values]
@@ -201,10 +294,9 @@ class LearnClient:
         Returns an empty list if this course doesn't have Quizzes enabled.
         """
         le_version, _ = self._versions()
-        data = self._get_or_empty(f"{BASE_URL}/d2l/api/le/{le_version}/{course_id}/quizzes/")
-        if not data:
+        quizzes = self._collection_or_empty(f"{BASE_URL}/d2l/api/le/{le_version}/{course_id}/quizzes/")
+        if not quizzes:
             return []
-        quizzes = data["Objects"] if isinstance(data, dict) else data
         return [
             Quiz(
                 id=str(q["QuizId"]),
@@ -213,6 +305,9 @@ class LearnClient:
                 is_active=q["IsActive"],
                 grade_item_id=str(q["GradeItemId"]) if q.get("GradeItemId") is not None else None,
                 description=(q.get("Description") or {}).get("Text", {}).get("Html") or None,
+                due_at=parse_iso8601(q.get("DueDate")),
+                start_at=parse_iso8601(q.get("StartDate")),
+                end_at=parse_iso8601(q.get("EndDate")),
                 raw=q,
             )
             for q in quizzes
@@ -224,7 +319,7 @@ class LearnClient:
         Returns an empty list if this course doesn't have News enabled.
         """
         le_version, _ = self._versions()
-        data = self._get_or_empty(f"{BASE_URL}/d2l/api/le/{le_version}/{course_id}/news/")
+        data = self._collection_or_empty(f"{BASE_URL}/d2l/api/le/{le_version}/{course_id}/news/")
         if not data:
             return []
         return [
@@ -285,7 +380,7 @@ class LearnClient:
         Returns an empty list if this course doesn't have Discussions enabled.
         """
         le_version, _ = self._versions()
-        data = self._get_or_empty(f"{BASE_URL}/d2l/api/le/{le_version}/{course_id}/discussions/forums/")
+        data = self._collection_or_empty(f"{BASE_URL}/d2l/api/le/{le_version}/{course_id}/discussions/forums/")
         if not data:
             return []
         return [

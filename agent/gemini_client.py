@@ -54,11 +54,10 @@ class GeminiUnavailableError(Exception):
 
 
 def _load_dotenv_if_present() -> None:
-    """Load GEMINI_API_KEY/GEMINI_MODEL from .env, same convention as
-    learn/credentials.py's WatIAM loading. Needed here specifically because
-    --test-llm and the interactive agent both reach get_api_key()/get_model()
-    without ever going through credentials.py's own dotenv loading (that
-    only runs inside the LEARN auth flow, which --test-llm skips entirely)."""
+    """Load GEMINI_API_KEY/GEMINI_MODEL from .env. Done here, on every
+    call, because --test-llm and the interactive agent both reach
+    get_api_key()/get_model() without any other code having loaded .env
+    first (--test-llm skips LEARN auth entirely)."""
     if not ENV_FILE.exists():
         return
     try:

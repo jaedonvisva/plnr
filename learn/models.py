@@ -56,7 +56,27 @@ class Course:
     """OrgUnit.HomeUrl -- a real, directly-provided navigable URL."""
     last_accessed_at: datetime | None
     """Access.LastAccessed, UTC."""
+    display_code: str | None = None
+    """"MSE 232", inferred from the start of `code` (see learn/terms.py). Not a
+    LEARN field; None when `code` doesn't start like a course code."""
+    term: str | None = None
+    """Waterloo term code (e.g. "1265") inferred from `code`."""
+    term_label: str | None = None
+    """"Spring 2026", derived from `term`."""
     raw: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class Attachment:
+    """A file attached to an assignment's instructions (metadata only, never downloaded).
+
+    Source: Attachments[] on a dropbox folder. Field names (Id/FileId, FileName/Name,
+    Size) follow agent2learn's handling; not yet confirmed on a live LEARN response here.
+    """
+
+    id: str
+    name: str
+    size_bytes: int | None
 
 
 @dataclass(frozen=True)
@@ -84,6 +104,7 @@ class Assignment:
     points_possible: float | None
     """Joined from Grade.points_possible via grade_item_id."""
     is_hidden: bool
+    attachments: list[Attachment] = field(default_factory=list)
     raw: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     # Deliberately NOT included: submission_status, url.
@@ -143,12 +164,15 @@ class Quiz:
     grade_item_id: str | None
     description: str | None
     """Description.Text.Html, or None if empty."""
+    due_at: datetime | None = None
+    """DueDate, UTC. Read the way agent2learn does; not yet confirmed on a live
+    LEARN quiz response here, and often null (quiz availability is usually
+    expressed via start/end instead)."""
+    start_at: datetime | None = None
+    """StartDate, UTC."""
+    end_at: datetime | None = None
+    """EndDate, UTC."""
     raw: dict[str, Any] | None = field(default=None, repr=False, compare=False)
-
-    # Deliberately NOT included: due_at. The live response we inspected was
-    # truncated before we could confirm a due-date field exists on this
-    # resource -- see README/deliverables note. Do not add it without
-    # verifying against a real response first.
 
 
 @dataclass(frozen=True)

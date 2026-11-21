@@ -1,6 +1,6 @@
 """Discord adapter configuration, read from the same .env file the rest of
-the project already uses (see learn/credentials.py, agent/gemini_client.py
-for the identical load-dotenv-if-present pattern).
+the project already uses (see agent/gemini_client.py for the
+identical load-dotenv-if-present pattern).
 
 DISCORD_BOT_TOKEN and DISCORD_ALLOWED_USER_ID are required -- there is no
 sensible default for either, and starting the bot without them would mean

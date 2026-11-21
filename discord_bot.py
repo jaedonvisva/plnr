@@ -1,10 +1,9 @@
 """Discord DM entry point for the LEARN agent.
 
-    python discord_bot.py                    Connect the LLM backend, open
-                                              LEARN auth (same visible
-                                              Chromium + WatIAM/Duo flow as
-                                              agent.py), wait for you to
-                                              finish logging in, then start
+    python discord_bot.py                    Connect the LLM backend, load the
+                                              saved LEARN session (or open the
+                                              same dedicated-browser WatIAM/Duo
+                                              sign-in as agent.py), then start
                                               listening for Discord DMs.
     python discord_bot.py --model qwen       Use local Ollama/Qwen instead
                                               of the default Gemini backend
@@ -12,6 +11,15 @@
     python discord_bot.py --debug            Print tool-call debug info to
                                               this terminal only -- never to
                                               Discord.
+    python discord_bot.py --service          Unattended mode (used by the launchd
+                                              LaunchAgent, see `agent.py
+                                              install-service`): never opens a
+                                              browser; exits 75 if there is no
+                                              saved LEARN session.
+
+While running, the bot also watches LEARN and DMs you on its own: a morning digest,
+"due tonight" and "last call" reminders, and changes (new announcements, grades, moved
+dates). Reply "done 2", "mute 2h" or "stop tonight" to steer it. See agent/proactive.py.
 
 This file is a TRANSPORT, not a second implementation of LEARN auth or the
 agent loop -- it reuses agent.py's _connect()/connect_and_authenticate()
@@ -30,7 +38,10 @@ from pathlib import Path
 
 from agent import backend as backend_module
 from discord_adapter.bot import LearnDiscordClient
+from agent.proactive import ProactiveAgent
+from agent.reminders import ReminderStore
 from discord_adapter.config import DiscordConfigError, load_config
+from discord_adapter.notifier import DiscordNotifier
 from discord_adapter.session import AgentSession
 
 # `import agent` is ambiguous in this directory: `agent.py` (this project's
@@ -50,29 +61,6 @@ agent_module = importlib.util.module_from_spec(_agent_py_spec)
 _agent_py_spec.loader.exec_module(agent_module)
 
 
-def _shutdown_browser(context, playwright, executor: ThreadPoolExecutor) -> None:
-    """Close the Playwright context and stop Playwright itself, both on
-    the executor's single worker thread -- the same thread that created
-    them. Playwright's sync API is thread-affine (see AgentSession's
-    docstring in discord_adapter/session.py); calling context.close() or
-    playwright.stop() from any other thread raises
-    `greenlet.error: Cannot switch to a different thread` on stop(), and
-    silently no-ops close() under the bare `except Exception: pass` here.
-    Blocks up to 30s for cleanup to finish before giving up."""
-
-    def _cleanup():
-        try:
-            context.close()
-        except Exception:
-            pass
-        playwright.stop()
-
-    try:
-        executor.submit(_cleanup).result(timeout=30)
-    except Exception as exc:
-        print(f"Browser cleanup failed: {exc}")
-
-
 def main() -> None:
     args = sys.argv[1:]
 
@@ -89,15 +77,19 @@ def main() -> None:
 
     llm_client = agent_module._connect(backend)
 
+    service_mode = "--service" in args
+    reminder_store = ReminderStore()
     executor = ThreadPoolExecutor(max_workers=1)
     try:
-        context, playwright, _learn_client, tools = executor.submit(
-            agent_module.connect_and_authenticate, backend
-        ).result()
+        # The bot never opens a browser mid-run (it may be 3 AM); an expired session is
+        # reported over Discord instead. --service also forbids it at startup.
+        learn_client, tools = agent_module.connect_and_authenticate(
+            backend, reauth=False, allow_login=not service_mode, reminder_store=reminder_store
+        )
     except agent_module.AgentStartupError as exc:
         print(f"\n{exc}")
         executor.shutdown(wait=False)
-        sys.exit(1)
+        sys.exit(75 if service_mode else 1)
 
     session = AgentSession(
         llm_client=llm_client,
@@ -105,14 +97,26 @@ def main() -> None:
         tools=tools,
         executor=executor,
         debug="--debug" in args,
+        time_hint=True,
+        finalize_reply=reminder_store.ensure_readbacks,
+    )
+
+    notifier = DiscordNotifier(discord_config.allowed_user_id)
+    proactive = ProactiveAgent(
+        learn_client,
+        notifier,
+        executor,
+        reminders=reminder_store,
+        refresh_session=agent_module.make_session_refresher(learn_client),
+        on_sent=session.add_note,
     )
 
     print("Discord bot connecting...")
-    client = LearnDiscordClient(session=session, config=discord_config)
+    client = LearnDiscordClient(session=session, config=discord_config, proactive=proactive)
+    notifier.bind(client)
     try:
         client.run(discord_config.bot_token)
     finally:
-        _shutdown_browser(context, playwright, executor)
         executor.shutdown(wait=False)
 
 

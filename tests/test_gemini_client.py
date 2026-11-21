@@ -216,7 +216,7 @@ def test_make_client_raises_when_api_key_missing(monkeypatch, tmp_path):
 
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     # get_api_key() reloads .env on every call (needed so --test-llm sees a
-    # real .env without going through credentials.py's own loading) -- point
+    # real .env without anything else having loaded it) -- point
     # it at a nonexistent file so a real developer .env can't leak the key
     # straight back into os.environ and defeat this test.
     monkeypatch.setattr(gemini_client, "ENV_FILE", tmp_path / "nonexistent.env")

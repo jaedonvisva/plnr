@@ -1,104 +1,289 @@
-"""Authentication detection and diagnostics.
+"""Same-device LEARN authentication: dedicated-browser CDP sign-in with a hidden-TTY paste fallback.
 
-This module never reads, stores, or transmits credentials. It only inspects
-public page state (URL, title, DOM, cookie names/domains, storage key names)
-to decide whether the user has completed Waterloo's WatIAM + Duo login flow
-in the visible browser themselves.
+Ported from agent2learn (https://github.com/ManagementMO/agent2learn, Apache-2.0,
+src/agent2learn/auth/__init__.py). The flow:
+
+    ensure_session()  ->  load stored session -> verify via /users/whoami
+                           -> (if missing/expired) authenticate() -> store
+
+`authenticate()` has only one fallback, the hidden-TTY paste flow. It never selects
+another browser-automation stack and never copies cookies from an everyday browser
+profile. This module never reads or fills a credential: the user completes WatIAM
+and Duo themselves in the dedicated browser window.
 """
 
-import time
-from urllib.parse import urlparse
+from __future__ import annotations
 
-from playwright.sync_api import Page
+import re
+import shutil
+import sys
+from urllib.parse import urljoin, urlsplit
 
-LEARN_HOST = "learn.uwaterloo.ca"
-AUTHENTICATED_PATH_PREFIX = "/d2l/"
-LOGIN_PATH_PREFIXES = ("/d2l/login",)
+import requests
 
+from . import paste, session
+from .cdp import UWATERLOO, School
+from .exceptions import BrowserNotFound, LoginError
 
-def current_url(page: Page) -> str:
-    """Get the page's true, live URL.
+_CONNECT_TIMEOUT = 10.0
+_READ_TIMEOUT = 30.0
+USER_AGENT = "plnr/0.1 (+https://github.com/jaedonvisva/plnr)"
 
-    `page.url` is NOT a live read -- it's a value Playwright caches from CDP
-    navigation events. During live testing, it was observed to go
-    completely stale (frozen on the WatIAM/ADFS URL, never updating again
-    for the rest of the process) after the WatIAM -> Duo -> LEARN redirect
-    chain on a first-time login, even though the browser had genuinely
-    finished navigating on screen and cookies were saved correctly.
-    Reused/already-authenticated sessions (a single same-origin load, no
-    multi-hop federation redirect) never triggered it.
-
-    page.evaluate("window.location.href") performs a real round trip into
-    the renderer and reads its actual current location, bypassing whatever
-    caused Playwright's own navigation-event bookkeeping to stop updating.
-    """
-    return page.evaluate("() => window.location.href")
+EXIT_SESSION_EXPIRED = 75
+"""`python agent.py auth --check` exits with this when the saved session is missing or expired."""
 
 
-def is_authenticated(page: Page, url: str) -> bool:
-    parsed = urlparse(url)
+def authenticate(school: School = UWATERLOO, *, backend: str = "auto") -> session.Session:
+    """Harvest, verify, and persist a minimum same-device LEARN API session."""
+    normalized_backend = backend.casefold()
+    if normalized_backend == "paste":
+        return _authenticate_from_paste(school)
+    if normalized_backend not in {"auto", "cdp"}:
+        raise LoginError(f"unknown authentication backend: {backend}")
 
-    if parsed.hostname != LEARN_HOST:
-        return False
-    if not parsed.path.startswith(AUTHENTICATED_PATH_PREFIX):
-        return False
-    if any(parsed.path.startswith(p) for p in LOGIN_PATH_PREFIXES):
-        return False
+    from . import cdp
 
-    if page.locator('input[type="password"]').count() > 0:
-        return False
-
-    return True
-
-
-class BrowserClosedError(Exception):
-    """Raised when the user closes the browser/tab before authentication completes."""
-
-
-def wait_for_authentication(page: Page, timeout_seconds: int = 900, poll_interval: float = 2.0) -> bool:
-    """Poll until LEARN authentication is detected or timeout elapses.
-
-    Raises BrowserClosedError if the page or browser is closed by the user.
-
-    Closure is detected via the context's "close" event, not by inferring it
-    from exception types on current_url()/page.locator(...). Those calls can
-    throw transiently mid-navigation (e.g. "Execution context was destroyed")
-    during the normal WatIAM -> Duo -> LEARN redirect chain, which is not a
-    closure and must not abort the wait. page.is_closed() also isn't
-    reliable here: it only reflects an individual *tab* closing, not the
-    whole persistent-context browser *process* being killed (e.g. closing
-    the last window) -- that case was observed to hang this loop forever
-    before this fix, since the swallowed exception just looked like
-    "not authenticated yet, keep waiting."
-    """
-    browser_closed = False
-
-    def _on_close(*_args) -> None:
-        nonlocal browser_closed
-        browser_closed = True
-
-    page.context.on("close", _on_close)
     try:
-        deadline = time.monotonic() + timeout_seconds
-        last_url = None
-        while time.monotonic() < deadline:
-            if browser_closed or page.is_closed():
-                raise BrowserClosedError("The browser was closed before authentication completed.")
-            try:
-                url = current_url(page)
-                authed = is_authenticated(page, url)
-            except Exception:
-                # Likely a transient mid-navigation error, not closure --
-                # closure is caught above via browser_closed/is_closed().
-                time.sleep(poll_interval)
-                continue
+        harvested = cdp.authenticate_browser(school)
+    except LoginError as exc:
+        safe_message = _safe_cdp_error(exc)
+        if normalized_backend == "auto":
+            raise LoginError(f"{safe_message}; fallback: python agent.py auth --paste") from None
+        raise LoginError(safe_message) from None
+    except (OSError, ValueError) as exc:
+        message = "dedicated browser authentication could not access local state"
+        if normalized_backend == "auto":
+            message += "; fallback: python agent.py auth --paste"
+        raise LoginError(message) from exc
 
-            if url != last_url:
-                print(f"  URL changed: {url}")
-                last_url = url
-            if authed:
-                return True
-            time.sleep(poll_interval)
-        return False
+    stable_id = _verified_id_from_cdp_result(harvested)
+    if stable_id is None:
+        raise LoginError("login could not be verified; try: python agent.py auth --paste")
+    verified = _with_user_id(harvested, stable_id)
+    _store_verified(verified)
+    return verified
+
+
+def ensure_session(school: School = UWATERLOO) -> session.Session:
+    """Return a verified session, reusing the stored one or signing in if needed."""
+    try:
+        stored = session.load()
+    except ValueError:
+        stored = None  # corrupt/unreadable store -> treat as signed out
+    if stored is not None and verify(stored, school) is not None:
+        return stored
+    return authenticate(school)
+
+
+def verify(value: session.Session, school: School = UWATERLOO) -> str | None:
+    """Return the stable D2L identifier after an authenticated, same-origin API check.
+
+    Calls /d2l/api/versions/ then /d2l/api/lp/{ver}/users/whoami. The response is
+    reduced immediately to ``Identifier``; display names never enter the returned
+    value or the persisted ``Session``. Returns None if the session is expired or
+    the check could not complete.
+    """
+    if _origin(value.base_url) != _origin(school.base_url):
+        raise LoginError("session and school must use the same HTTPS origin")
+
+    transport = requests.Session()
+    transport.trust_env = False
+    transport.cookies.update(value.requests_cookies())
+    headers = {"User-Agent": USER_AGENT}
+    if value.xsrf:
+        headers["X-Csrf-Token"] = value.xsrf
+
+    versions_url = urljoin(value.base_url.rstrip("/") + "/", "d2l/api/versions/")
+    try:
+        versions_response = transport.get(
+            versions_url,
+            headers=headers,
+            timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
+            allow_redirects=False,
+        )
+    except requests.RequestException:
+        return None
+    try:
+        if not 200 <= versions_response.status_code < 300:
+            return None
+        if "text/html" in versions_response.headers.get("Content-Type", "").casefold():
+            return None
+        versions = versions_response.json()
+    except (ValueError, requests.RequestException):
+        return None
     finally:
-        page.context.remove_listener("close", _on_close)
+        versions_response.close()
+
+    for version in _lp_versions(versions):
+        whoami_url = urljoin(value.base_url.rstrip("/") + "/", f"d2l/api/lp/{version}/users/whoami")
+        try:
+            response = transport.get(
+                whoami_url,
+                headers=headers,
+                timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
+                allow_redirects=False,
+            )
+        except requests.RequestException:
+            continue
+        try:
+            if not 200 <= response.status_code < 300:
+                continue
+            if "text/html" in response.headers.get("Content-Type", "").casefold():
+                continue
+            payload = response.json()
+        except (ValueError, requests.RequestException):
+            continue
+        finally:
+            response.close()
+
+        identifier = _stable_identifier(payload)
+        if identifier is not None:
+            return identifier
+    return None
+
+
+def clear_profile() -> None:
+    """Clear the stored session and remove the dedicated browser profile after consent."""
+    from .cdp import profile_path
+
+    try:
+        session.clear()
+    except OSError as exc:
+        raise LoginError(
+            "saved API session could not be cleared; close it or fix its permissions and retry"
+        ) from exc
+    profile = profile_path()
+    if profile.is_symlink():
+        raise LoginError(f"refusing to remove symlinked profile: {profile}")
+    if _profile_is_locked(profile):
+        raise LoginError(
+            f"dedicated browser profile is in use; close it normally before removing: {profile}"
+        )
+    if not profile.exists():
+        return
+    if not profile.is_dir():
+        raise LoginError(f"dedicated browser profile is not a directory: {profile}")
+    if not _tty(sys.stdin) or not _tty(sys.stdout):
+        raise LoginError(f"profile removal requires an interactive confirmation for: {profile}")
+
+    sys.stderr.write(
+        "This removes the dedicated browser profile and its Waterloo/Duo remembered state:\n"
+        f"  {profile}\n"
+        "Type 'yes' to continue: "
+    )
+    sys.stderr.flush()
+    answer = sys.stdin.readline().strip().casefold()
+    sys.stderr.write("\n")
+    if answer != "yes":
+        raise LoginError("profile removal cancelled")
+    try:
+        shutil.rmtree(profile)
+    except OSError as exc:
+        raise LoginError("dedicated browser profile could not be removed; close it and retry") from exc
+
+
+def _authenticate_from_paste(school: School) -> session.Session:
+    return authenticate_from_blob(paste.read_hidden_multiline(), school)
+
+
+def authenticate_from_blob(blob: str, school: School = UWATERLOO) -> session.Session:
+    """Parse pasted/piped cookies, verify them against LEARN, and only then store them."""
+    pending = paste.session_from_blob(blob, base_url=school.base_url)
+    stable_id = verify(pending, school)
+    if stable_id is None:
+        raise LoginError("login could not be verified; the cookies may be expired or incomplete")
+    verified = _with_user_id(pending, stable_id)
+    _store_verified(verified)
+    return verified
+
+
+def _store_verified(value: session.Session) -> None:
+    try:
+        session.store(value)
+    except (OSError, ValueError) as exc:
+        raise LoginError("verified session could not be saved; check local permissions") from exc
+
+
+def _with_user_id(value: session.Session, stable_id: str) -> session.Session:
+    return session.Session(
+        base_url=value.base_url,
+        cookies=value.cookies,
+        xsrf=value.xsrf,
+        harvested_at=value.harvested_at,
+        user_id=stable_id,
+    )
+
+
+def _verified_id_from_cdp_result(value: object) -> str | None:
+    if isinstance(value, session.Session):
+        return value.user_id
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _safe_cdp_error(exc: LoginError) -> str:
+    """Expose fixed local prerequisite diagnostics, never arbitrary browser exception text."""
+    if isinstance(exc, BrowserNotFound):
+        return "Chrome or Edge was not found; install one for dedicated-browser sign-in"
+
+    prefix = "authentication stopped at undeclared host "
+    raw = str(exc)
+    if raw.startswith(prefix):
+        host = raw[len(prefix) :].split(";", 1)[0].strip()
+        if re.fullmatch(r"[A-Za-z0-9.:-]{1,253}", host):
+            return f"{prefix}{host}"
+    return "dedicated browser authentication failed"
+
+
+def _lp_versions(payload: object) -> tuple[str, ...]:
+    if not isinstance(payload, list):
+        return ()
+    found: list[str] = []
+    for product in payload:
+        if not isinstance(product, dict) or product.get("ProductCode") != "lp":
+            continue
+        versions: list[str] = []
+        latest = product.get("LatestVersion")
+        if isinstance(latest, str):
+            versions.append(latest)
+        supported = product.get("SupportedVersions")
+        if isinstance(supported, list):
+            versions.extend(v for v in supported if isinstance(v, str))
+        for version in versions:
+            if version and version not in found:
+                found.append(version)
+    return tuple(found)
+
+
+def _stable_identifier(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("Identifier")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+def _origin(value: str) -> tuple[str, str, int]:
+    parsed = urlsplit(value)
+    if parsed.scheme.casefold() != "https" or parsed.hostname is None:
+        raise LoginError("authentication requires an HTTPS school origin")
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise LoginError("school origin has an invalid port") from exc
+    return parsed.scheme.casefold(), parsed.hostname.rstrip(".").casefold(), port
+
+
+def _profile_is_locked(profile) -> bool:
+    return any((profile / marker).exists() for marker in ("SingletonLock", "SingletonSocket", "SingletonCookie"))
+
+
+def _tty(stream: object) -> bool:
+    isatty = getattr(stream, "isatty", None)
+    return bool(callable(isatty) and isatty())

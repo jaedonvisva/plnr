@@ -1,6 +1,6 @@
 """Discord transport for the LEARN agent -- authorization, commands, rate
 limiting, and message chunking. Deliberately contains NO LEARN logic, no
-Valence calls, no Playwright, no tool implementations, no LLM/prompt logic:
+Valence calls, no browser, no tool implementations, no LLM/prompt logic:
 everything here either rejects a message outright or hands it to an
 AgentSession (discord_adapter/session.py), which is the only thing that
 ever touches run_turn()/TurnGuard/LearnClient/tools.
@@ -129,6 +129,8 @@ async def handle_incoming(
     author_id: int,
     is_dm: bool,
     text: str,
+    command_handler=None,
+    reply_to_id: int | None = None,
 ) -> list[str]:
     """Core message-handling decision logic. Returns the message chunks to
     send in reply -- an empty list means send nothing (e.g. an
@@ -155,6 +157,12 @@ async def handle_incoming(
     if lowered == "!status":
         return [format_status(session.status())]
 
+    # Replies to proactive messages ("done 2", "mute 2h", "!digest"): deterministic, no model.
+    if command_handler is not None:
+        command_reply = command_handler(stripped, reply_to_id)
+        if command_reply is not None:
+            return chunk_message(convert_markdown_tables(command_reply))
+
     if lock.locked():
         return [BUSY_MESSAGE]
 
@@ -171,10 +179,10 @@ class LearnDiscordClient(discord.Client):
     this class never constructs one itself. Discord gateway
     reconnects (temporary internet loss, websocket disconnects) are
     handled internally by discord.py within this same Client instance and
-    never recreate `self._session` -- the browser, LearnClient, and
+    never recreate `self._session` -- the LearnClient and
     conversation history all survive a reconnect untouched."""
 
-    def __init__(self, session, config: DiscordConfig, **kwargs):
+    def __init__(self, session, config: DiscordConfig, proactive=None, **kwargs):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents, **kwargs)
@@ -185,9 +193,22 @@ class LearnDiscordClient(discord.Client):
             max_per_hour=config.max_messages_per_hour,
         )
         self._lock = asyncio.Lock()
+        # `proactive` is built in discord_bot.py (it needs LEARN access, which this module
+        # must not have). Here it is only an object with run() and handle_command().
+        self._proactive = proactive
+        self._proactive_task: asyncio.Task | None = None
 
     async def on_ready(self) -> None:
         print(f"Discord bot connected as {self.user} -- listening for DMs.")
+        # on_ready fires again after every gateway reconnect; start the loop exactly once.
+        if self._proactive is not None and self._proactive_task is None:
+            self._proactive_task = asyncio.create_task(self._proactive.run())
+            print("Proactive monitoring on.")
+
+    async def close(self) -> None:
+        if self._proactive_task is not None:
+            self._proactive_task.cancel()
+        await super().close()
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
@@ -204,6 +225,8 @@ class LearnDiscordClient(discord.Client):
                 author_id=message.author.id,
                 is_dm=is_dm,
                 text=message.content,
+                command_handler=self._proactive.handle_command if self._proactive else None,
+                reply_to_id=message.reference.message_id if message.reference else None,
             )
 
         # Discord's native "X is typing..." indicator, so a long run_turn()

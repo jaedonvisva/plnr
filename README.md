@@ -3,8 +3,9 @@
 Ask your D2L/Brightspace account a question, get a real answer — from a
 terminal or a Discord DM.
 
-You log into WatIAM + Duo yourself, in a real, visible browser. This app
-never sees your credentials. From there, an LLM answers questions about
+You log into WatIAM + Duo yourself, in a dedicated Chrome/Edge window. This
+app never sees your credentials; it keeps only the handful of LEARN session
+cookies it needs, then talks to LEARN over plain HTTPS. From there, an LLM answers questions about
 your courses, assignments, grades, quizzes, and announcements by calling a
 small set of **read-only** tools against Brightspace's documented API.
 Nothing here can click, submit, or change anything — every call is a `GET`.
@@ -29,10 +30,11 @@ flowchart TD
     DB --> DA["discord_adapter/bot.py"]
     DA --> DS["discord_adapter/session.py"]
 
-    A --> AUTH["WatIAM + Duo<br/>(visible browser, self-login)"]
+    A --> AUTH["WatIAM + Duo<br/>(dedicated Chrome, self-login)"]
     DS --> AUTH
-    AUTH --> BR["learn/browser.py<br/>persistent context → .auth/"]
-    BR --> LC["learn/client.py<br/>LearnClient (GET-only)"]
+    AUTH --> BR["learn/cdp.py + session.py<br/>CDP sign-in → stored session"]
+    BR --> TR["learn/transport.py<br/>requests + cookies"]
+    TR --> LC["learn/client.py<br/>LearnClient (GET-only)"]
     LC --> VAPI[("Valence REST API<br/>learn.uwaterloo.ca")]
     VAPI --> MODELS["learn/models.py<br/>typed domain models"]
     MODELS --> AGG["agent/aggregation.py<br/>cross-course filter/search"]
@@ -49,8 +51,9 @@ flowchart TD
     click DB "https://github.com/jaedonvisva/plnr/blob/main/discord_bot.py" "Discord DM entry point" _blank
     click DA "https://github.com/jaedonvisva/plnr/blob/main/discord_adapter/bot.py" "Message handling, auth/DM gating, chunking" _blank
     click DS "https://github.com/jaedonvisva/plnr/blob/main/discord_adapter/session.py" "Owns the agent loop per Discord session" _blank
-    click AUTH "https://github.com/jaedonvisva/plnr/blob/main/learn/auth.py" "Login-completion detection" _blank
-    click BR "https://github.com/jaedonvisva/plnr/blob/main/learn/browser.py" "Playwright persistent-context lifecycle" _blank
+    click AUTH "https://github.com/jaedonvisva/plnr/blob/main/learn/auth.py" "Sign-in orchestration + whoami verification" _blank
+    click BR "https://github.com/jaedonvisva/plnr/blob/main/learn/cdp.py" "Dedicated-browser CDP sign-in, origin-gated" _blank
+    click TR "https://github.com/jaedonvisva/plnr/blob/main/learn/transport.py" "Cookie-replay HTTP transport, expiry detection, retries" _blank
     click LC "https://github.com/jaedonvisva/plnr/blob/main/learn/client.py" "LearnClient: Valence HTTP calls, typed errors" _blank
     click MODELS "https://github.com/jaedonvisva/plnr/blob/main/learn/models.py" "Course/Assignment/Grade/Quiz/Announcement dataclasses" _blank
     click AGG "https://github.com/jaedonvisva/plnr/blob/main/agent/aggregation.py" "Deterministic date filtering, search, sorting" _blank
@@ -73,10 +76,10 @@ git clone <this repo>
 cd <this repo>
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-playwright install chromium
 ```
 
 ```bash
+python agent.py auth            # one-time sign-in (needs Chrome or Edge)
 python agent.py                 # chat in your terminal
 python discord_bot.py           # chat over Discord DM instead
 ```
@@ -86,7 +89,14 @@ python discord_bot.py           # chat over Discord DM instead
 | `--model qwen` | Local Ollama (`qwen3:8b`), nothing leaves your machine |
 | `--model gemini` (default) | Google's Gemini API — needs `GEMINI_API_KEY` in `.env` |
 | `--debug` | Print tool calls to your terminal, never to Discord |
-| `python agent.py logout` | Wipe the saved LEARN session |
+| `python agent.py auth` | Sign in via a dedicated Chrome/Edge window, save the session |
+| `python agent.py auth --check` | Verify the saved session, no browser (exit 75 if expired) |
+| `python agent.py auth --paste` | Sign in by pasting cookies (hidden input) — no browser/display needed |
+| `python agent.py auth --clear-profile` | Remove saved session + browser profile (resets Duo trust) |
+| `python agent.py logout` | Forget the saved session (keeps Duo trust) |
+| `python agent.py today [--days N] [--ics FILE]` | What's due (past due, today, coming up) with no LLM; optional `.ics` calendar export |
+| `python agent.py diff [--no-save]` | What changed in LEARN since the last check: new/removed items, moved due dates, edited announcements, grade changes |
+| `python agent.py doctor` | Diagnose setup problems and print one next step |
 | `python agent.py --test-llm` | Check LLM connectivity only, no browser |
 
 **Optional: announcement triage.** `pip install -r requirements-triage.txt`
@@ -98,9 +108,45 @@ announcement. Scores are estimates, not LEARN facts. Run
 accuracy before trusting a threshold (the bundled fixture is synthetic).
 
 `.env.example` has the full list of optional config (`GEMINI_API_KEY`,
-`DISCORD_BOT_TOKEN` + `DISCORD_ALLOWED_USER_ID`, optional WatIAM auto-fill).
+`DISCORD_BOT_TOKEN` + `DISCORD_ALLOWED_USER_ID`).
 
 ---
+
+## Always-on mode
+
+`python discord_bot.py` doesn't only answer questions: it also watches LEARN and messages you first.
+Detection is plain Python (no model decides what to send); times are Waterloo local.
+
+| When | What you get |
+|---|---|
+| 8:00 | Digest: past due, today, tomorrow, this week |
+| 18:00 and 22:30 | "Due tonight" and "Last call" for items due late evening (most deadlines are 11:59 PM). Items due before noon are announced the evening before |
+| Any daytime poll (every 15 min) | New or edited announcements, posted grades, new items, moved due dates, batched into one message |
+| 23:30-08:00 | Silence. Reminders wait (and are dropped if the deadline passes); changes arrive at the next daytime poll |
+
+Reply to a ping with `done 2` (or `done`, `done all`) when something is handed in: LEARN doesn't tell us
+whether you submitted, so this is how reminders stop. Also: `undo`, `mute 2h`, `stop tonight`, `unmute`, `!digest`.
+Anything else is a normal question; the chat agent sees the ping as context.
+
+**Reminders.** Just say it in chat: "remind me tomorrow at 9 to email my TA", "ping me in an hour", "remind me
+the day before A4 is due to proofread". The model works out the time from the conversation; the system then
+replies with a computed confirmation (`Reminder #3 set for Sun Oct 11, 9:00 AM (tomorrow): email my TA`) so a
+wrong date is visible. They arrive at the exact time (even in quiet hours; `mute` still holds them), also while
+your LEARN session is expired. `reminders` lists them, `cancel 3` removes one. No recurring reminders.
+`scripts/eval_reminders.py` checks the model's date handling against the live API.
+
+If the LEARN session expires you get one DM; run `python agent.py auth` and it resumes by itself. The bot
+never opens a browser on its own.
+
+Run it at login with launchd (macOS):
+
+```bash
+python agent.py install-service --load     # logs: .plnr/logs/
+python agent.py uninstall-service
+```
+
+State lives in `.plnr/` (`ledger.json`, `proactive_snapshot.json`): ids, course labels and item names only.
+Code: `agent/watchers.py` (what to say), `agent/proactive.py` (the loop), `agent/replies.py`, `agent/ledger.py`.
 
 ## Layout
 
@@ -110,7 +156,7 @@ discord_bot.py        Discord DM entry point
 learn/                 auth + Brightspace API client, normalized into typed models
 agent/                  LLM tool layer + the tool-calling loop (Qwen or Gemini)
 discord_adapter/         Discord transport — DM gating, rate limiting, chunking
-tests/                    200+ tests, fully offline
+tests/                    300+ tests, fully offline
 scripts/                   eval_triage.py — measure triage accuracy (manual)
 ```
 
@@ -118,13 +164,20 @@ scripts/                   eval_triage.py — measure triage accuracy (manual)
 
 ## Security, in short
 
-- **No credentials, by default.** You complete WatIAM + Duo yourself; this
-  code only watches the URL and DOM, never fills the login form.
-- **Session, not password, on disk.** `.auth/browser-profile/` holds live
-  cookies, gitignored, wiped with `python agent.py logout`.
+Login flow adapted from [agent2learn](https://github.com/ManagementMO/agent2learn) (Apache-2.0).
+
+
+- **No credentials, ever.** You complete WatIAM + Duo yourself; this code
+  never reads or fills the login form. During sign-in the dedicated browser is
+  gated to LEARN, Duo and Waterloo's ADFS — any other host stops the flow.
+- **Minimal session on disk.** Only five whitelisted LEARN cookies + the CSRF
+  token are kept (OS keyring if the optional `keyring` package is installed,
+  else `.auth/session.json`, mode 0600). The dedicated browser profile in
+  `.auth/chrome-profile/` holds Duo's remembered-device state. Both are
+  gitignored; `python agent.py auth --clear-profile` wipes them.
 - **The LLM sees your data, never your session.** Only chat + tool results
   (HTML-stripped, `raw` fields dropped) reach the model — never cookies,
-  never Playwright, never `.env`.
+  never the browser, never `.env`.
 - **Gemini is the default backend** — your prompts and LEARN data go to
   Google unless you pass `--model qwen`, which keeps everything local.
 - **Discord bot replies to exactly one user ID.** Everyone else gets

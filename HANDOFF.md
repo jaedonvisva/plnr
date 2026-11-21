@@ -32,23 +32,22 @@ README.md has the short version. This is the hop-by-hop breakdown.
             │
             ▼
 ┌─────────────────────────┐
-│   Waterloo WatIAM + Duo   │  the user completes this themselves, in a real
-│  (visible Chromium window)│  visible browser window. This code never fills
-└───────────┬──────────────┘  or reads the login form (unless .env opt-in
-            │                  auto-fill is enabled — see below).
+│   Waterloo WatIAM + Duo   │  the user completes this themselves in a
+│ (dedicated Chrome/Edge)   │  dedicated browser window (learn/cdp.py).
+└───────────┬──────────────┘  This code never fills or reads the login form.
+            │                  Login is detected when /users/whoami succeeds.
             ▼
 ┌─────────────────────────┐
-│  Playwright BrowserContext│  learn/browser.py: launch_persistent_context()
-│  (persisted to .auth/)    │  learn/auth.py: waits for authentication,
-└───────────┬──────────────┘  detects it via a LIVE window.location.href
-            │                  read, not Playwright's cached page.url
+│  Stored session            │  learn/session.py: five whitelisted LEARN
+│  (keyring or .auth/)       │  cookies + CSRF token. The browser is closed.
+└───────────┬──────────────┘
+            │
             ▼
 ┌─────────────────────────┐
-│  context.request           │  Playwright's APIRequestContext, sharing the
-│  (Playwright's HTTP client)│  SAME cookie jar as the browser above. This
-└───────────┬──────────────┘  IS the entire Valence authentication
-            │                  mechanism — plain cookies, no OAuth, no
-            │                  API key. See client.py docstring.
+│  SessionTransport          │  learn/transport.py: plain `requests` with the
+│  (learn/transport.py)      │  stored cookies. No OAuth, no API key. HTML/
+└───────────┬──────────────┘  redirect/401 = expired → re-auth once, retry.
+            │
             ▼
 ┌─────────────────────────┐
 │      LearnClient           │  learn/client.py: 7 read-only methods,
@@ -110,76 +109,57 @@ README.md has the short version. This is the hop-by-hop breakdown.
 
 ## Module-by-module reference
 
-### `learn/browser.py`
-`launch_browser()` calls Playwright's `launch_persistent_context()` — not
-`launch()` + `new_context()`. This is the single most important choice in
-the whole auth layer: a persistent context writes its entire Chrome profile
-(cookies, local storage) to `.auth/browser-profile/` on disk, which is what
-lets you skip WatIAM/Duo on subsequent runs. `clear_session()` just deletes
-that directory (used by `agent.py logout`).
-
-Returns `(context, playwright)` — callers must call `playwright.stop()`
-themselves; closing the context alone does not stop the Node.js driver
-process underneath (see the `EPIPE` note in the bugs section below).
+### `learn/cdp.py`
+Dedicated-browser sign-in over the Chrome DevTools Protocol. Launches the
+user's own Chrome/Edge with `--remote-debugging-port=0` and a dedicated
+`--user-data-dir` (`.auth/chrome-profile`, which keeps Duo's remembered-device
+state), validates the loopback DevTools endpoint, then gates **every** request
+(`Fetch.requestPaused`) to LEARN, `*.duosecurity.com` and `adfs.uwaterloo.ca`
+(https, port 443, DNS-label boundary match). Login is detected by running
+`/d2l/api/lp/{ver}/users/whoami` inside the page until it returns an
+`Identifier`; then only the whitelisted cookies are harvested and the browser
+is closed. It never reads or fills the login form.
 
 ### `learn/auth.py`
-Two jobs: detect when the user has finished logging in, and never touch the
-login form itself.
+Orchestration: `ensure`-style reuse (`session.load()` + `verify()`),
+`authenticate()` (CDP, or `backend="paste"`), `verify()` (versions → whoami
+over plain `requests`), `clear_profile()` (typed-confirmation removal of the
+session and browser profile). `python agent.py auth --check` exits 75 when the
+session is missing/expired.
 
-- `current_url(page)` — reads `window.location.href` via `page.evaluate()`,
-  **not** `page.url`. This exists because of a real bug found in live
-  testing (see below): `page.url` is a Playwright-cached value that can go
-  permanently stale mid-session during a multi-hop SSO redirect chain.
-- `is_authenticated(page, url)` — three checks: host is `learn.uwaterloo.ca`,
-  path starts with `/d2l/`, and (defensively) no `<input type="password">`
-  is present. No network calls beyond what's already needed to read the URL
-  and query the DOM.
-- `wait_for_authentication(page, timeout=900s, poll=2s)` — polls the above
-  in a loop. Registers a `context.on("close", ...)` listener to detect the
-  *entire browser process* being killed (not just a tab) — `page.is_closed()`
-  alone doesn't catch that case; this was also a live-found bug (see below).
-  Raises `BrowserClosedError` if so.
+### `learn/session.py`
+`Session` (base URL, whitelisted cookies scoped to the LEARN host, CSRF token,
+harvest time, user id) plus `store/load/clear`. Backend: OS keyring if the
+optional `keyring` package is installed (macOS calls run in a bounded child
+process), else `.auth/session.json` written atomically with mode 0600.
 
-### `learn/credentials.py`
-The **one** module in this project that ever touches a credential, and only
-because the user explicitly requested it (see the "iMessage agent" design
-discussion — the goal is eventually running this unattended). Everything
-else in this project still has the original "never touches credentials"
-guarantee by default.
+### `learn/paste.py`
+Fallback for machines with no browser/display: parses a pasted `Cookie:`
+header, JSON export, or DevTools cookie table from a hidden, TTY-only prompt
+(piped input is refused).
 
-- Reads `WATIAM_USERNAME`/`WATIAM_PASSWORD` from a local `.env` file (via
-  `python-dotenv`) — nothing is hardcoded, nothing is passed on the command
-  line.
-- `maybe_autofill_login(page)` fills WatIAM's real ADFS login form fields
-  (`#userNameInput`, `#passwordInput`, `#submitButton` — confirmed live
-  against the actual form at adfs.uwaterloo.ca) and submits. The live form
-  is two-step: a username-only screen, then a password screen revealed
-  after clicking `#nextButton`. **`#nextButton` and `#submitButton` are two
-  separate elements, not the same one reused** — `#submitButton` is
-  `display:none` and non-interactable until after `#nextButton` is
-  clicked. (An earlier version of this function assumed they were the same
-  element and clicked `#submitButton` on the username step, which silently
-  did nothing — confirmed live, then fixed.) **Duo is never touched** —
-  whatever happens after submitting (straight through if Duo's
-  browser-trust cookie is still valid, or a Duo push that needs you) is
-  handled identically by the same `wait_for_authentication()` as always.
-- Returns `False` and does nothing if no `.env`/credentials are present —
-  every script's default behavior is completely unaffected.
-- **Explicit security trade-off, not hidden:** a session cookie in `.auth/`
-  is time-and-scope-limited if leaked. A plaintext WatIAM password in `.env`
-  is not — it's a fully reusable credential. This is real risk kept on disk
-  intentionally, at the user's request, for a specific future goal.
+### `learn/transport.py`
+`SessionTransport.get(url)` — `requests` with the stored cookies
+(`trust_env=False`, same-origin only, no redirects, `X-Csrf-Token`). A 401,
+redirect or HTML body where JSON is expected means the session expired →
+`LearnAuthenticationError`. 429/5xx are retried with backoff and
+`Retry-After`. With a `reauth` callback (agent.py passes `auth.authenticate`),
+an expired session triggers one sign-in and one retry of that request; a
+failed sign-in is not retried for 120 s.
+
+### `learn/terms.py`
+Infers `display_code` ("MSE 232"), `term` ("1265") and `term_label` ("Spring
+2026") from `OrgUnit.Code` (e.g. `MSE232_prof_1265`). These are **inferred
+from the string, not LEARN fields**; anything that doesn't match returns `None`
+instead of a guess. Term digits: 1 = Winter, 5 = Spring, 9 = Fall.
 
 ### `learn/client.py`
 `LearnClient` — the only thing that talks to Valence.
 
-- Constructor takes a Playwright `BrowserContext` and stores `context.request`
-  (its `APIRequestContext`). This is the entire authentication mechanism:
-  `context.request` automatically shares the same cookie jar as the browser
-  window the user logged into. No `Authorization` header, no OAuth token, no
-  ID-Key HMAC signature — anywhere. Verified empirically, not assumed (see
-  the full architecture audit that was done mid-project — the "Executive
-  Summary" of that audit is effectively encoded in this module's docstring).
+- Constructor takes a transport (anything with `.get(url)` returning
+  `.status/.ok/.json()` — in production `SessionTransport`). Authentication
+  is entirely the stored session cookies: no `Authorization` header, no OAuth
+  token, no ID-Key HMAC signature. Verified empirically, not assumed.
 - `_versions()` calls `GET /d2l/api/versions/` once and caches the `le`/`lp`
   version strings, rather than hardcoding a version number that could go
   stale after a Brightspace upgrade.
@@ -247,9 +227,11 @@ unreliable, not because no one thought of them:
   observed as `-1` (unpopulated) for the Student role in every response.
 - `Assignment.url` — no real per-assignment browsable link field exists;
   `ActivityId` is an opaque LTI-style identifier, not a page URL.
-- `Quiz.due_at` — the live quiz response captured during investigation was
-  truncated before a due-date field could be confirmed to exist. Not added
-  rather than guessed.
+- Quiz dates were once excluded for lack of a confirmed field. `Quiz.due_at`/
+  `start_at`/`end_at` now read `DueDate`/`StartDate`/`EndDate`, following
+  agent2learn's handling; **not yet confirmed against a live LEARN quiz
+  response here**, and often null. A quiz with no `DueDate` is never listed
+  as "upcoming" (the tool result's `note` says so).
 - Course-level "current grade" — no reliable aggregate endpoint exists;
   `/grades/final/values/myGradeValue` 404'd during investigation. Not
   computed by summing weighted items either, since that's the exact kind of
@@ -278,8 +260,7 @@ sends anything off-device.
 ### `agent/gemini_client.py`
 The one cloud-API module in the project, strictly opt-in via `--model
 gemini` (the current default backend — see `agent/backend.py`). Reads
-`GEMINI_API_KEY`/`GEMINI_MODEL` from `.env` the same way `learn/credentials.py`
-reads WatIAM's. `GeminiClient.chat()` is written to satisfy the exact same
+`GEMINI_API_KEY`/`GEMINI_MODEL` from `.env`. `GeminiClient.chat()` is written to satisfy the exact same
 duck-typed interface `agent/loop.py` already expected from `ollama.Client`
 (see `tests/fake_ollama.py`'s shape) — `response.message.content` /
 `response.message.tool_calls[i].function.name`/`.arguments`. Because
@@ -303,6 +284,32 @@ module docstring for the exact resolution rules (`qwen`/`ollama` aliases,
 `gemini` alias, or a literal model id routed by whether it starts with
 `"gemini"`). `DEFAULT_MODEL` is Gemini's default model — omitting `--model`
 entirely uses Gemini, not local Qwen.
+
+### `agent/today.py`
+Deterministic, LLM-free deadline view and iCalendar export behind
+`python agent.py today`. Buckets assignments/quizzes into past due (assignments
+only, last 14 days, **no grade recorded** — LEARN exposes no submission status,
+so it is never called "missing"), due today (Waterloo-local date), and coming
+up. A course that failed to load is printed as a warning, never as "nothing
+due". `.ics` output: CRLF, RFC 5545 line folding at 75 octets, escaped text,
+UIDs hashed from course+item ids (re-importing updates events rather than
+duplicating), each deadline a 30-minute block ending at the due time. Names
+and dates only.
+
+### `agent/changes.py`
+Snapshot/diff behind `python agent.py diff` and the optional
+`get_recent_changes` tool. Per active course it stores assignment/quiz dates,
+announcement titles + edit times, and displayed grade strings (never bodies or
+comments) in `.plnr/snapshot.json` (0600, gitignored). A course that fails to
+load keeps its old snapshot and is listed in `errors` — it is never reported as
+"everything removed". First run saves a baseline and reports `first_run: true`.
+The tool is registered only when a `SnapshotStore` is passed to `build_tools`.
+
+### `agent/doctor.py`
+`python agent.py doctor`: Python version, browser found, saved session (and
+whether LEARN still accepts it), session-file permissions, Gemini key set,
+optional triage/Discord config. Reports whether secrets are *set*, never their
+values, and names one next step (failures before warnings).
 
 ### `agent/tools.py`
 The **only** thing the LLM can call — the boundary between the normalized
@@ -387,10 +394,10 @@ argv and `agent/backend.py` resolves it to a `Backend` (name, model,
 client-construction, connectivity check, exception type) before anything
 else runs — the rest of `agent.py` doesn't know or care which LLM backend
 was picked. `run_logout()` implements the `logout` subcommand (just calls
-`browser.clear_session()`). `run_test_llm()` implements `--test-llm`
+`session.clear()`); `run_auth()` implements `auth [--check|--paste|--clear-profile]`. `run_test_llm()` implements `--test-llm`
 (LLM-only, no LEARN). `run_interactive_agent(backend, debug)` does the full
-flow: check the resolved backend → launch browser → auth (with optional
-credential auto-fill) → `LearnClient` → `build_tools()` → REPL loop calling
+flow: check the resolved backend → reuse the stored session or sign in via the
+dedicated browser → `LearnClient(SessionTransport)` → `build_tools()` → REPL loop calling
 `agent/loop.py`'s `run_turn()` per user message, maintaining `messages` as
 ongoing history across turns within one process run (no persistence across
 runs, and no mid-conversation backend switching — the backend is fixed for
@@ -400,18 +407,23 @@ the whole run).
 
 ## Key engineering decisions, and why
 
-- **`launch_persistent_context`, not `launch` + `new_context`.** The whole
-  "don't re-authenticate every run" property depends on this one choice —
-  it's what makes `.auth/browser-profile/` a real, reusable Chrome profile
-  rather than throwaway in-memory state.
-- **Cookie-based Valence auth via `context.request`, not a registered
-  OAuth/ID-Key application.** This wasn't a shortcut — it was investigated
-  explicitly (see the architecture audit). Registering a real Valence
-  application requires Waterloo IT/Brightspace admin approval, which an
-  individual student generally can't self-serve. Riding the same cookies
-  LEARN's own frontend JS uses was the only practical option, and it works
-  because `context.request` genuinely shares the browser's cookie jar
-  (verified, not assumed).
+- **Real Chrome over CDP with a dedicated profile, then plain HTTP.** The
+  browser exists only to let the user complete WatIAM + Duo. The profile
+  (`.auth/chrome-profile`) persists so Duo's remembered-device state survives,
+  and only five whitelisted LEARN cookies + the CSRF token are copied out.
+  Everything after sign-in is `requests`, so no browser has to stay open.
+- **Cookie-based Valence auth, not a registered OAuth/ID-Key application.**
+  This wasn't a shortcut — it was investigated explicitly (see the
+  architecture audit). Registering a real Valence application requires
+  Waterloo IT/Brightspace admin approval, which an individual student
+  generally can't self-serve. Replaying the same cookies LEARN's own frontend
+  JS uses was the only practical option (verified, not assumed).
+- **Login is detected by the API, not the URL.** `/users/whoami` returning an
+  `Identifier` is the definition of "signed in"; URL and DOM heuristics are
+  not used. The same check powers `auth --check` and session reuse.
+- **An HTML/redirect/401 response means expired — never empty data.** The
+  transport converts it to `LearnAuthenticationError`, and re-authenticates
+  once before surfacing it.
 - **Normalization lives in `learn/`, LLM-safety concerns live in `agent/`.**
   Two different boundaries for two different reasons: `learn/models.py`
   turns D2L's shape into a stable Python interface for *any* consumer;
@@ -457,32 +469,14 @@ account, not by inspection — several contradicted what seemed like
 reasonable assumptions going in. Recorded in detail so nobody "fixes" them
 back to the broken version by accident.
 
-1. **`page.is_closed()` doesn't detect a killed browser *process*, only a
-   closed *tab*.** Closing the entire Chromium window (not just switching
-   away) hung `wait_for_authentication()` forever, because the DOM-check
-   exception it caused was silently swallowed as "not authenticated yet."
-   **Fix:** listen for the `BrowserContext`'s own `"close"` event instead of
-   inferring closure from exception types.
-
-2. **`page.url` can go permanently stale mid-session.** During a genuine
-   first-time login (WatIAM → ADFS → Duo → back to LEARN), `page.url` was
-   observed to freeze on the WatIAM URL forever — confirmed with per-tick
-   debug logging showing dozens of identical reads with zero exceptions,
-   while the browser had visibly, successfully reached LEARN on screen.
-   Reused/already-authenticated sessions (single same-origin load, no
-   multi-hop federation redirect) never triggered it. **Fix:**
-   `current_url()` reads `window.location.href` via `page.evaluate()` — a
-   real round trip into the renderer — instead of trusting Playwright's
-   CDP-event-driven cache.
-
-3. **`get_announcements()` across 4 courses (110 items, full HTML bodies)
+1. **`get_announcements()` across 4 courses (110 items, full HTML bodies)
    made a single agent turn hang.** Not infinite — just extremely slow
    local inference on an enormous prompt, with no timeout configured to
    surface that clearly. **Fix:** HTML-stripped, 500-char-truncated
    rich-text fields in `agent/tools.py` (item counts stay uncapped, per
    explicit decision), plus `get_announcement_detail()` as an escape hatch.
 
-4. **The model stopped after one tool call and just narrated a plan** for
+2. **The model stopped after one tool call and just narrated a plan** for
    genuinely broad questions ("gather info about all my final exams") —
    e.g. "Let me start with EARTH 123..." with no further tool call, which
    the loop correctly (but unhelpfully) treated as the final answer.
@@ -492,12 +486,12 @@ back to the broken version by accident.
    multiple courses is not ambiguous and must not be treated as a stopping
    point.
 
-5. **`MAX_TOOL_ROUNDS=8` was too low** once fix #4 made the model actually
+3. **`MAX_TOOL_ROUNDS=8` was too low** once fix #2 made the model actually
    follow through — a 7-course sweep (1×`get_courses` + 7×`get_assignments`)
    used the entire cap with zero rounds left to synthesize an answer, so it
    hit the generic "wasn't able to finish" fallback. **Fix:** raised to 20.
 
-6. **The final summary silently dropped one course (MSE 263) that had zero
+4. **The final summary silently dropped one course (MSE 263) that had zero
    results**, while correctly mentioning two *other* zero-result courses
    ("have no assignments listed"). The tool call for that course was
    correct and returned the correct empty result — this was purely an
@@ -505,7 +499,7 @@ back to the broken version by accident.
    system-prompt rule to account for every course checked, even ones with
    nothing found.
 
-7. **`get_courses()` was called with a hallucinated `{'filter': 'MSE 263'}`
+5. **`get_courses()` was called with a hallucinated `{'filter': 'MSE 263'}`
    argument** when a query already named a specific course — reproduced
    twice, consistently, not sampling noise. Caught cleanly by existing
    `TypeError` handling in `agent/loop.py` (no crash), but the model then
@@ -515,7 +509,7 @@ back to the broken version by accident.
    `tool_error`/`unknown_tool` result means *your* mistake, and the
    corrected call must happen immediately, not be described.
 
-8. **MSE 263's due dates only exist as free text inside announcements**,
+6. **MSE 263's due dates only exist as free text inside announcements**,
    not through the Dropbox/assignments API at all (`get_assignments()`
    legitimately, correctly returns `0` items for that course). Before a
    fix, asking "what's due in MSE 263" got a flat "no assignments found" —
@@ -529,13 +523,7 @@ back to the broken version by accident.
    though both prompt phrasings asked for it explicitly — see
    [Known limitations](#known-limitations--open-items).
 
-9. **The Node.js driver process Playwright spawns underneath can log an
-   `EPIPE` error when a Python process holding it is killed abruptly**
-   (e.g. via a background-task stop). This is expected cleanup noise from
-   an ungraceful shutdown, not a real bug — noted here only so it isn't
-   mistaken for one if seen again.
-
-10. **Early hallucination risk in agent answers**, found on the very first
+7. **Early hallucination risk in agent answers**, found on the very first
     real end-to-end agent test: the model invented "Status: Submitted/Not
     yet submitted" (no such field exists — `Assignment` deliberately has no
     submission-status field, see `learn/models.py`) and a computed
@@ -553,9 +541,11 @@ back to the broken version by accident.
 python -m pytest
 ```
 
-177 tests, all offline — no live LEARN login, no live Ollama server, no
-Gemini API key, no network access at all. Three fake layers make this possible:
-- `tests/fake_valence.py` — a fake Playwright `APIRequestContext` whose
+300+ tests, all offline — no live LEARN login, no live Ollama server, no
+Gemini API key, no network access at all. Fake layers make this possible (the login flow has its own offline tests in
+`tests/test_login_flow.py`: session store, cookie paste, CDP origin gate and
+endpoint validation, transport expiry/retry/re-auth, whoami verification):
+- `tests/fake_valence.py` — a fake transport (`SessionTransport`'s `.get` surface) whose
   `.get(url)` returns a scripted `(status, body)` pair from a `routes`
   dict, so `LearnClient` can be tested against real-shaped (but synthetic)
   JSON fixtures in `tests/fixtures/`.
@@ -614,10 +604,9 @@ none of these tests exercise real model reasoning (for either backend).
   covers both "tool disabled for this course" and "you don't have
   permission" — Valence's response shape doesn't let `LearnClient`
   distinguish them.
-- **`Quiz.due_at` doesn't exist** — the live response needed to confirm
-  the field name was truncated mid-investigation and never re-verified.
-  Would need one more live authenticated fetch of a single quiz's full JSON
-  to add safely.
+- **Quiz date fields are unverified live.** They're read as `DueDate`/
+  `StartDate`/`EndDate` (as agent2learn does) and parse to `None` when absent.
+  One authenticated fetch of a real quiz would confirm the names.
 - **No conversation persistence across process runs** — `agent.py`'s
   `messages` list only lives for one run; exiting and restarting starts
   fresh.
@@ -641,7 +630,7 @@ discussed before this document was written:
    implemented:** add a request timeout to the Ollama client
    (`agent/llm.py::make_client()` currently has none) with a clear
    "the model timed out" message instead of an indefinite hang — the
-   truncation fix (bug #3 above) addressed the specific case that caused
+   truncation fix (bug #1 above) addressed the specific case that caused
    the original hang, but no general timeout safety net exists yet.
 3. **Unattended/Discord-driven operation** (the actual stated end goal of
    this project — see `discord_adapter/` and `discord_bot.py`). Two real
@@ -649,16 +638,15 @@ discussed before this document was written:
    - Duo's browser-trust cookie (`browsertrust` on `api-*.duosecurity.com`)
      genuinely persists across sessions — confirmed live, multiple times,
      across real gaps of time, with zero Duo prompts as long as
-     `.auth/browser-profile/` survives. Actual enforced duration is
+     the dedicated browser profile (`.auth/chrome-profile/`) survives. Actual enforced duration is
      unknown (cookie's technical expiry was ~1 month out when checked, but
      Duo admin policy could cap it shorter).
    - **WatIAM's own ADFS session is the harder blocker, not Duo** — it was
      directly observed to expire on a shorter cycle, requiring the
-     password again while Duo stayed trusted. `learn/credentials.py`
-     exists specifically to let this be automated (opt-in), but Duo
-     approval, whenever it *is* required, cannot be automated by design and
-     needs a human-in-the-loop notification mechanism that doesn't exist
-     yet.
+     password again while Duo stayed trusted. The transport re-runs
+     sign-in once when it hits an expired session, but the user still has
+     to complete it in the browser window; a human-in-the-loop notification
+     (e.g. a Discord DM) for that doesn't exist yet.
 4. **Extend the tool layer** if new use cases need it — `get_discussion_forums()`
    already exists in `LearnClient` but isn't exposed as an agent tool (no
    `Forum`/`Discussion` domain model was ever requested). Would need a
@@ -667,11 +655,10 @@ discussed before this document was written:
 
 **If you're an agent picking this up cold:** read
 [Bugs found during live testing](#bugs-found-during-live-testing-and-their-fixes)
-before touching `learn/auth.py` or `agent/system_prompt.py` — nearly
-everything non-obvious in those two files exists because of a specific,
-reproduced live failure, not speculation. Don't revert `current_url()` to
-`page.url`, don't recreate the `is_closed()`-only browser-closure check,
-and don't change the system prompt without live-retesting the exact
-scenario that motivated whatever rule you're touching — the test suite
-will still pass either way, since none of it exercises real model
-reasoning.
+before touching `agent/system_prompt.py` — nearly everything non-obvious in
+it exists because of a specific, reproduced live failure, not speculation.
+Don't change the system prompt without live-retesting the exact scenario that
+motivated whatever rule you're touching — the test suite will still pass
+either way, since none of it exercises real model reasoning. For the login
+flow, `learn/cdp.py`'s origin gate and `learn/auth.py::verify` are the
+security-relevant parts; keep the cookie whitelist and same-origin checks.

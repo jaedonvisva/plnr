@@ -4,7 +4,7 @@ import pytest
 
 from agent import aggregation
 from learn.exceptions import LearnApiError
-from learn.models import Announcement, Assignment, ContentItem, Course
+from learn.models import Announcement, Assignment, ContentItem, Course, Quiz
 
 
 def make_course(id_, name="Course", is_active=True):
@@ -31,6 +31,19 @@ def make_assignment(id_, course_id, due_at, name="Assignment"):
         points_earned=None,
         points_possible=None,
         is_hidden=False,
+        raw=None,
+    )
+
+
+def make_quiz(id_, course_id, due_at, name="Quiz"):
+    return Quiz(
+        id=id_,
+        course_id=course_id,
+        name=name,
+        is_active=True,
+        grade_item_id=None,
+        description=None,
+        due_at=due_at,
         raw=None,
     )
 
@@ -67,13 +80,20 @@ class FakeClient:
     """Configurable per-course fake, keyed by course_id. Raising an entry
     for a course simulates that course's endpoint failing."""
 
-    def __init__(self, assignments=None, announcements=None, content=None):
+    def __init__(self, assignments=None, announcements=None, content=None, quizzes=None):
+        self.quizzes = quizzes or {}
         self.assignments = assignments or {}
         self.announcements = announcements or {}
         self.content = content or {}
 
     def get_assignments(self, course_id):
         value = self.assignments.get(course_id, [])
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def get_quizzes(self, course_id):
+        value = self.quizzes.get(course_id, [])
         if isinstance(value, Exception):
             raise value
         return value
@@ -164,9 +184,44 @@ def test_upcoming_assignments_items_have_provenance():
     assert item["verified_structured_assignment"] is True
 
 
-def test_upcoming_assignments_notes_quizzes_are_excluded():
+def test_upcoming_note_explains_quiz_coverage():
     result = aggregation.collect_upcoming_assignments(FakeClient(), [], days_ahead=7, now=NOW)
-    assert "quiz" in result["note"].lower()
+    assert "quiz" in result["note"].lower() and "duedate" in result["note"].lower()
+
+
+def test_upcoming_includes_quizzes_with_due_dates_in_window_sorted_with_assignments():
+    courses = [make_course("1")]
+    client = FakeClient(
+        assignments={"1": [make_assignment("a1", "1", NOW + timedelta(days=3), "HW")]},
+        quizzes={
+            "1": [
+                make_quiz("q1", "1", NOW + timedelta(days=1), "Quiz soon"),
+                make_quiz("q2", "1", NOW + timedelta(days=30), "Quiz far"),
+                make_quiz("q3", "1", None, "Quiz undated"),
+            ]
+        },
+    )
+    result = aggregation.collect_upcoming_assignments(client, courses, days_ahead=7, now=NOW)
+    assert [(i["type"], i["name"]) for i in result["items"]] == [("quiz", "Quiz soon"), ("assignment", "HW")]
+    assert result["items"][0]["source"] == "structured_quiz_data"
+    assert result["courses_with_no_results"] == []
+
+
+def test_course_with_only_an_in_window_quiz_is_not_reported_as_empty():
+    client = FakeClient(quizzes={"1": [make_quiz("q1", "1", NOW + timedelta(days=2))]})
+    result = aggregation.collect_upcoming_assignments(client, [make_course("1")], days_ahead=7, now=NOW)
+    assert len(result["items"]) == 1 and result["courses_with_no_results"] == []
+
+
+def test_quiz_fetch_error_is_reported_per_course_without_aborting_others():
+    courses = [make_course("1"), make_course("2")]
+    client = FakeClient(
+        assignments={"2": [make_assignment("a", "2", NOW + timedelta(days=1))]},
+        quizzes={"1": LearnApiError("boom")},
+    )
+    result = aggregation.collect_upcoming_assignments(client, courses, days_ahead=7, now=NOW)
+    assert [e["course_id"] for e in result["errors"]] == ["1"]
+    assert len(result["items"]) == 1
 
 
 # ---- search_announcements ------------------------------------------------
